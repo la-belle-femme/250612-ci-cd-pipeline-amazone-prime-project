@@ -4,7 +4,7 @@ pipeline {
     environment {
         // DockerHub credentials
         DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')
-        DOCKER_IMAGE = 'la-belle-femme/amazon-prime-clone'
+        DOCKER_IMAGE = 'bettysami/amazon-prime-clone'
         SONARQUBE_SERVER = 'SonarQube'
         SONARQUBE_TOKEN = credentials('sonarqube-token')
         
