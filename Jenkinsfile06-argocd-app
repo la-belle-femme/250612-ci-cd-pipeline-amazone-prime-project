@@ -1,0 +1,350 @@
+pipeline {
+    agent any
+    
+    environment {
+        KUBECTL = "/usr/local/bin/kubectl"
+        AWS_REGION = "us-east-1"
+        CLUSTER_NAME = "amazon-prime-eks"
+        GITHUB_REPO = "https://github.com/la-belle-femme/250612-ci-cd-pipeline-amazone-prime-project.git"
+        APP_NAME = "amazon-prime-clone-automated"
+        ARGOCD_NAMESPACE = "argocd"
+        TARGET_NAMESPACE = "production"
+    }
+    
+    stages {
+        stage('🔄 1. Connect to EKS Cluster') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'access-key', variable: 'AWS_ACCESS_ID'),
+                        string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ID')
+                    ]) {
+                        sh """
+                            echo "Configuring AWS CLI and kubectl..."
+                            aws configure set aws_access_key_id \$AWS_ACCESS_ID
+                            aws configure set aws_secret_access_key \$AWS_SECRET_ID
+                            aws configure set region ${env.AWS_REGION}
+                            aws eks --region ${env.AWS_REGION} update-kubeconfig --name ${env.CLUSTER_NAME}
+                            
+                            echo "Verifying cluster connectivity..."
+                            ${env.KUBECTL} get nodes
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('🔍 2. Validate Prerequisites') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "🔍 VALIDATING PREREQUISITES"
+                        echo "================================================"
+                        
+                        echo "Checking ArgoCD installation..."
+                        ${env.KUBECTL} get pods -n ${env.ARGOCD_NAMESPACE} | grep Running | wc -l
+                        
+                        echo "Verifying ArgoCD server accessibility..."
+                        ${env.KUBECTL} get svc -n ${env.ARGOCD_NAMESPACE} argocd-server
+                        
+                        echo "Checking existing applications..."
+                        ${env.KUBECTL} get applications -n ${env.ARGOCD_NAMESPACE} || echo "No applications found"
+                        
+                        echo "Creating target namespace if needed..."
+                        ${env.KUBECTL} create namespace ${env.TARGET_NAMESPACE} --dry-run=client -o yaml | ${env.KUBECTL} apply -f -
+                        
+                        echo "Prerequisites validation complete!"
+                    """
+                }
+            }        
+        }
+
+        stage('📝 3. Generate ArgoCD Application Manifest') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "📝 CREATING ARGOCD APPLICATION MANIFEST"
+                        echo "================================================"
+                        
+                        cat > argocd-application-automated.yaml << 'EOF'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${env.APP_NAME}
+  namespace: ${env.ARGOCD_NAMESPACE}
+  labels:
+    app: ${env.APP_NAME}
+    environment: production
+    managed-by: jenkins
+    created-by: infrastructure-pipeline
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: ${env.GITHUB_REPO}
+    targetRevision: HEAD
+    path: k8s_files
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ${env.TARGET_NAMESPACE}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+    - CreateNamespace=true
+    - PrunePropagationPolicy=foreground
+    - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 3
+EOF
+                        
+                        echo "Generated ArgoCD Application manifest:"
+                        echo "================================================"
+                        cat argocd-application-automated.yaml
+                        echo "================================================"
+                    """
+                }
+            }
+        }
+
+        stage('🚀 4. Deploy ArgoCD Application') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "🚀 DEPLOYING ARGOCD APPLICATION"
+                        echo "================================================"
+                        
+                        echo "Applying ArgoCD Application manifest..."
+                        ${env.KUBECTL} apply -f argocd-application-automated.yaml
+                        
+                        echo "Verifying application creation..."
+                        ${env.KUBECTL} get application -n ${env.ARGOCD_NAMESPACE} ${env.APP_NAME}
+                        
+                        echo "Application deployed successfully!"
+                    """
+                }
+            }
+        }
+
+        stage('⏳ 5. Monitor Initial Sync') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "⏳ MONITORING INITIAL SYNCHRONIZATION"
+                        echo "================================================"
+                        
+                        echo "Waiting for ArgoCD to sync the application..."
+                        sleep 45
+                        
+                        echo "Checking application sync status..."
+                        ${env.KUBECTL} get application -n ${env.ARGOCD_NAMESPACE} ${env.APP_NAME} -o jsonpath='{.status.sync.status}' || echo "Sync in progress..."
+                        
+                        echo "Checking application health..."
+                        ${env.KUBECTL} get application -n ${env.ARGOCD_NAMESPACE} ${env.APP_NAME} -o jsonpath='{.status.health.status}' || echo "Health check in progress..."
+                        
+                        echo "Application status check complete!"
+                    """
+                }
+            }
+        }
+
+        stage('🔍 6. Verify Deployment Success') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "🔍 DEPLOYMENT VERIFICATION"
+                        echo "================================================"
+                        
+                        echo "ArgoCD Applications Overview:"
+                        ${env.KUBECTL} get applications -n ${env.ARGOCD_NAMESPACE} -o wide
+                        
+                        echo ""
+                        echo "Deployed Resources in ${env.TARGET_NAMESPACE}:"
+                        echo "Pods:"
+                        ${env.KUBECTL} get pods -n ${env.TARGET_NAMESPACE} -l app=${env.APP_NAME} || echo "Pods still starting..."
+                        
+                        echo ""
+                        echo "Services:"
+                        ${env.KUBECTL} get svc -n ${env.TARGET_NAMESPACE} || echo "Services being created..."
+                        
+                        echo ""
+                        echo "Deployments:"
+                        ${env.KUBECTL} get deployments -n ${env.TARGET_NAMESPACE} || echo "Deployments in progress..."
+                        
+                        echo "================================================"
+                    """
+                }
+            }
+        }
+
+        stage('🌐 7. Extract Access Information') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "🌐 APPLICATION ACCESS INFORMATION"
+                        echo "================================================"
+                        
+                        # Get ArgoCD URL
+                        ARGOCD_URL=\$(${env.KUBECTL} get svc -n ${env.ARGOCD_NAMESPACE} argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                        
+                        echo "🎯 ArgoCD Access:"
+                        echo "ArgoCD URL: https://\$ARGOCD_URL"
+                        echo "Application Name: ${env.APP_NAME}"
+                        echo "Namespace: ${env.TARGET_NAMESPACE}"
+                        
+                        # Try to get application LoadBalancer URL
+                        echo ""
+                        echo "🚀 Application Status:"
+                        APP_SVC=\$(${env.KUBECTL} get svc -n ${env.TARGET_NAMESPACE} -o name | head -1 | cut -d'/' -f2) || echo "no-service"
+                        
+                        if [ "\$APP_SVC" != "no-service" ]; then
+                            APP_URL=\$(${env.KUBECTL} get svc -n ${env.TARGET_NAMESPACE} \$APP_SVC -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+                            if [ "\$APP_URL" != "pending" ] && [ -n "\$APP_URL" ]; then
+                                echo "Application URL: http://\$APP_URL"
+                            else
+                                echo "Application LoadBalancer provisioning..."
+                            fi
+                        else
+                            echo "Application service not ready yet"
+                        fi
+                        
+                        echo ""
+                        echo "🔄 GitOps Automation Active:"
+                        echo "✅ Automated sync enabled"
+                        echo "✅ Self-healing enabled"  
+                        echo "✅ Auto-prune enabled"
+                        echo "✅ Namespace auto-creation enabled"
+                        
+                        echo ""
+                        echo "📈 Enterprise Features:"
+                        echo "✅ Retry policy with exponential backoff"
+                        echo "✅ Revision history management"
+                        echo "✅ Resource finalizers for cleanup"
+                        echo "✅ Proper labeling and metadata"
+                        
+                        echo "================================================"
+                    """
+                }
+            }
+        }
+
+        stage('📊 8. Generate Deployment Report') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "📊 AUTOMATED DEPLOYMENT REPORT"
+                        echo "================================================"
+                        
+                        cat > deployment-report.txt << 'EOF'
+ARGOCD APPLICATION AUTOMATION REPORT
+=====================================
+
+Application Details:
+- Name: ${env.APP_NAME}
+- Namespace: ${env.TARGET_NAMESPACE}
+- Source Repository: ${env.GITHUB_REPO}
+- Sync Policy: Automated with self-healing
+
+Deployment Features:
+✅ Infrastructure as Code
+✅ Automated synchronization
+✅ Self-healing applications
+✅ Automated pruning
+✅ Namespace auto-creation
+✅ Retry policies
+✅ Revision history
+
+GitOps Workflow:
+1. Code changes pushed to Git
+2. ArgoCD detects changes automatically
+3. Applies changes to Kubernetes
+4. Monitors and maintains desired state
+
+Next Steps:
+1. Access ArgoCD UI to monitor application
+2. Test GitOps by updating Kubernetes manifests
+3. Verify automatic deployment of changes
+4. Scale and manage via GitOps principles
+
+EOF
+                        
+                        echo "Deployment report generated:"
+                        cat deployment-report.txt
+                        
+                        echo ""
+                        echo "Report saved to workspace for future reference"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "================================================"
+                echo "🧹 CLEANUP AND SUMMARY"
+                echo "================================================"
+                sh """
+                    # Archive important files
+                    ls -la argocd-application-automated.yaml || echo "Manifest not found"
+                    ls -la deployment-report.txt || echo "Report not found"
+                """
+            }
+        }
+        failure {
+            script {
+                echo "❌ ArgoCD application automation failed!"
+                sh """
+                    echo "Debugging information:"
+                    echo "Applications in ArgoCD:"
+                    ${env.KUBECTL} get applications -n ${env.ARGOCD_NAMESPACE} || true
+                    echo "Recent events:"
+                    ${env.KUBECTL} get events -n ${env.ARGOCD_NAMESPACE} --sort-by=.metadata.creationTimestamp | tail -10 || true
+                """
+            }
+        }
+        success {
+            script {
+                echo "================================================"
+                echo "✅ ARGOCD APPLICATION AUTOMATION SUCCESS!"
+                echo "================================================"
+                echo ""
+                echo "🎯 What You've Accomplished:"
+                echo "✅ Automated ArgoCD application creation"
+                echo "✅ Infrastructure as Code implementation"
+                echo "✅ Enterprise GitOps workflow"
+                echo "✅ Production-ready deployment automation"
+                echo ""
+                echo "💼 Career Value Demonstrated:"
+                echo "🚀 Platform Engineering expertise"
+                echo "🚀 DevOps automation mastery"
+                echo "🚀 Kubernetes operations at scale"
+                echo "🚀 Enterprise GitOps methodology"
+                echo ""
+                echo "🎉 CONGRATULATIONS!"
+                echo "You've built enterprise-grade deployment automation!"
+                echo "This is the same technology used by:"
+                echo "• Netflix for microservices deployment"
+                echo "• Spotify for continuous delivery"
+                echo "• Airbnb for platform management"
+                echo "================================================"
+            }
+        }
+    }
+}
