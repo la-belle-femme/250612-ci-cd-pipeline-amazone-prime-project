@@ -1,0 +1,199 @@
+pipeline {
+    agent any
+    
+    environment {
+        KUBECTL = "/usr/local/bin/kubectl"
+        HELM = "${WORKSPACE}/helm"
+        AWS_REGION = "us-east-1"
+        CLUSTER_NAME = "amazon-prime-eks"
+        PATH = "${WORKSPACE}:${env.PATH}"
+    }
+    
+    stages {
+        stage('🔄 1. Login to Cluster') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'access-key', variable: 'AWS_ACCESS_ID'),
+                        string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ID')
+                    ]) {
+                        sh """
+                            aws configure set aws_access_key_id \$AWS_ACCESS_ID
+                            aws configure set aws_secret_access_key \$AWS_SECRET_ID
+                            aws configure set region ${env.AWS_REGION}
+                            aws eks --region ${env.AWS_REGION} update-kubeconfig --name ${env.CLUSTER_NAME}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('🔄 2. Check Access') {
+            steps {
+                script {
+                    sh """
+                        echo "Testing kubectl access..."
+                        ${env.KUBECTL} get nodes
+                        ${env.KUBECTL} get namespaces
+                    """
+                }
+            }        
+        }
+
+        stage('📦 3. Install Helm (User Directory)') {
+            steps {
+                script {
+                    sh """
+                        echo "Installing Helm to user directory..."
+                        
+                        # Create workspace bin directory if it doesn't exist
+                        mkdir -p ${WORKSPACE}/bin
+                        
+                        # Download Helm binary directly
+                        curl -fsSL -o helm.tar.gz https://get.helm.sh/helm-v3.18.3-linux-amd64.tar.gz
+                        
+                        # Extract Helm binary
+                        tar -zxvf helm.tar.gz
+                        
+                        # Move helm binary to workspace bin directory
+                        mv linux-amd64/helm ${WORKSPACE}/bin/helm
+                        
+                        # Make it executable
+                        chmod +x ${WORKSPACE}/bin/helm
+                        
+                        # Clean up
+                        rm -rf helm.tar.gz linux-amd64/
+                        
+                        # Verify installation
+                        ${WORKSPACE}/bin/helm version
+                        
+                        # Add Prometheus community Helm repository
+                        ${WORKSPACE}/bin/helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+                        ${WORKSPACE}/bin/helm repo update
+                        
+                        echo "Helm installed and configured successfully in user directory!"
+                    """
+                }
+            }
+        }
+
+        stage('🏗️ 4. Create Prometheus Namespace') {
+            steps {
+                script {
+                    sh """
+                        echo "Creating prometheus namespace..."
+                        ${env.KUBECTL} create namespace prometheus --dry-run=client -o yaml | ${env.KUBECTL} apply -f -
+                        
+                        echo "Verifying namespace creation..."
+                        ${env.KUBECTL} get namespace prometheus
+                    """
+                }
+            }
+        }
+
+        stage('📊 5. Install kube-prometheus-stack') {
+            steps {
+                script {
+                    sh """
+                        echo "Installing kube-prometheus-stack..."
+                        ${WORKSPACE}/bin/helm install prometheus-stack prometheus-community/kube-prometheus-stack \\
+                            --namespace prometheus \\
+                            --set prometheus.service.type=LoadBalancer \\
+                            --set grafana.service.type=LoadBalancer \\
+                            --set prometheus.service.port=9090 \\
+                            --set grafana.service.port=80 \\
+                            --wait --timeout=10m
+                        
+                        echo "Installation completed!"
+                    """
+                }
+            }
+        }
+
+        stage('🔍 6. Verify Installation') {
+            steps {
+                script {
+                    sh """
+                        echo "Checking all pods in prometheus namespace..."
+                        ${env.KUBECTL} get pods -n prometheus
+                        
+                        echo "Checking services..."
+                        ${env.KUBECTL} get svc -n prometheus
+                        
+                        echo "Waiting for LoadBalancers to get external IPs..."
+                        sleep 60
+                        
+                        echo "Getting LoadBalancer URLs..."
+                        echo "================================================"
+                        echo "🎉 INSTALLATION COMPLETE!"
+                        echo "================================================"
+                        
+                        # Get Prometheus URL
+                        PROMETHEUS_SVC=\$(${env.KUBECTL} get svc -n prometheus prometheus-stack-kube-prom-prometheus -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+                        if [ "\$PROMETHEUS_SVC" != "pending" ] && [ -n "\$PROMETHEUS_SVC" ]; then
+                            echo "Prometheus URL: http://\$PROMETHEUS_SVC:9090"
+                        else
+                            echo "Prometheus LoadBalancer still pending... Check AWS Console for ELB"
+                        fi
+                        
+                        # Get Grafana URL
+                        GRAFANA_SVC=\$(${env.KUBECTL} get svc -n prometheus prometheus-stack-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+                        if [ "\$GRAFANA_SVC" != "pending" ] && [ -n "\$GRAFANA_SVC" ]; then
+                            echo "Grafana URL: http://\$GRAFANA_SVC"
+                        else
+                            echo "Grafana LoadBalancer still pending... Check AWS Console for ELB"
+                        fi
+                        
+                        echo "================================================"
+                    """
+                }
+            }
+        }
+
+        stage('📝 7. Get Grafana Password') {
+            steps {
+                script {
+                    sh """
+                        echo "Retrieving Grafana admin password..."
+                        GRAFANA_PASSWORD=\$(${env.KUBECTL} get secret -n prometheus prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 --decode)
+                        echo "================================================"
+                        echo "📊 GRAFANA LOGIN DETAILS:"
+                        echo "Username: admin"
+                        echo "Password: \$GRAFANA_PASSWORD"
+                        echo "================================================"
+                        echo "💡 Save these credentials - you'll need them to access Grafana!"
+                        echo "================================================"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "Pipeline completed. Check the console output for access URLs and credentials."
+            }
+        }
+        failure {
+            script {
+                echo "Pipeline failed. Check the logs for details."
+                sh """
+                    echo "Debugging information:"
+                    ${env.KUBECTL} get pods -n prometheus || true
+                    ${env.KUBECTL} get events -n prometheus --sort-by=.lastTimestamp || true
+                    
+                    echo "Helm status:"
+                    ls -la ${WORKSPACE}/bin/ || true
+                """
+            }
+        }
+        success {
+            script {
+                echo "✅ Prometheus & Grafana successfully installed!"
+                echo "🎯 Next steps: Install ArgoCD and set up your application deployment."
+                echo "💰 Remember: You're now running LoadBalancers - they cost money when not in use!"
+            }
+        }
+    }
+}
