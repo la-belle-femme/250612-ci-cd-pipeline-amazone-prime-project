@@ -1,0 +1,16 @@
+# 1. Reconnect
+aws eks update-kubeconfig --region us-east-1 --name amazon-prime-eks
+
+# 2. Scale up applications
+kubectl scale deployment amazon-prime-clone --replicas=2 -n default
+kubectl scale deployment amazon-prime-clone --replicas=2 -n production
+kubectl scale deployment prometheus-stack-grafana --replicas=1 -n prometheus
+
+# 3. Re-enable ArgoCD auto-sync
+kubectl patch application amazon-prime-clone-automated -n argocd --type merge -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
+
+# 4. Start Jenkins
+aws ec2 start-instances --instance-ids i-09bf8f01952ecad1b
+
+# 5. Wait 5-10 minutes, then get new URLs
+kubectl get svc -A | grep LoadBalancer

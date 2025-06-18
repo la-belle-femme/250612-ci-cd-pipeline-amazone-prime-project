@@ -1,0 +1,331 @@
+# Resume Work Guide - 24 Hours Later
+## Complete Step-by-Step Infrastructure Restart
+
+### 🎯 Goal: Restore Your Enterprise Platform to Full Operation
+**Expected Resume Time: 10-15 minutes**
+
+---
+
+## 📋 PHASE 1: INITIAL RECONNECTION (3 minutes)
+
+### Step 1: Reconnect to AWS and Kubernetes
+```bash
+# Navigate to your project directory
+cd ~/OneDrive/Documents/DYLAN-PROJECTS/CI-CD/ci-cd-pipeline-project/250612-ci-cd-pipeline-amazone-prime-project
+
+# Update kubectl configuration for EKS cluster
+aws eks update-kubeconfig --region us-east-1 --name amazon-prime-eks
+echo "✅ kubectl configured for EKS cluster"
+
+# Verify cluster connectivity
+kubectl get nodes
+echo "✅ Cluster connectivity verified"
+```
+
+### Step 2: Check Preserved Infrastructure
+```bash
+# Verify what's still running from your pause
+echo "=== CHECKING PRESERVED INFRASTRUCTURE ==="
+
+# Check cluster nodes
+kubectl get nodes
+
+# Check preserved namespaces
+kubectl get namespaces
+
+# Check ArgoCD (should still be running)
+kubectl get pods -n argocd
+echo "✅ ArgoCD status checked"
+
+# Check Prometheus (should still be running)
+kubectl get pods -n prometheus | grep -v grafana
+echo "✅ Prometheus status checked"
+```
+
+---
+
+## 🔄 PHASE 2: RESTART APPLICATIONS (5 minutes)
+
+### Step 3: Scale Up Your Applications
+```bash
+# Scale up Amazon Prime Clone in default namespace
+kubectl scale deployment amazon-prime-clone --replicas=2 -n default
+echo "✅ Default namespace application scaling up"
+
+# Scale up Amazon Prime Clone in production namespace
+kubectl scale deployment amazon-prime-clone --replicas=2 -n production
+echo "✅ Production namespace application scaling up"
+
+# Verify applications are starting
+kubectl get pods -n default | grep amazon-prime-clone
+kubectl get pods -n production | grep amazon-prime-clone
+```
+
+### Step 4: Restart Grafana
+```bash
+# Scale up Grafana dashboard
+kubectl scale deployment prometheus-stack-grafana --replicas=1 -n prometheus
+echo "✅ Grafana scaling up"
+
+# Check Grafana pod status
+kubectl get pods -n prometheus | grep grafana
+```
+
+### Step 5: Restart Jenkins (If You Stopped It)
+```bash
+# Start Jenkins EC2 instance
+aws ec2 start-instances --instance-ids i-0ca32c89a19c57520
+echo "✅ Jenkins instance starting"
+
+# Check instance status (wait 2-3 minutes for full startup)
+aws ec2 describe-instances --instance-ids i-0ca32c89a19c57520 --query 'Reservations[*].Instances[*].State.Name' --output text
+```
+
+---
+
+## ⏳ PHASE 3: WAIT FOR SERVICES (5 minutes)
+
+### Step 6: Monitor Pod Startup
+```bash
+# Watch pods come online (this will show real-time status)
+echo "Monitoring pod startup..."
+kubectl get pods -n default -w &
+WATCH_PID=$!
+
+# Wait for pods to be ready (or manually check every 30 seconds)
+sleep 180
+
+# Stop the watch
+kill $WATCH_PID 2>/dev/null
+
+# Check final pod status
+kubectl get pods -A | grep -E "(amazon-prime-clone|grafana)"
+```
+
+### Step 7: Verify LoadBalancer Provisioning
+```bash
+# Check LoadBalancer services
+echo "=== LOADBALANCER STATUS ==="
+kubectl get svc -A | grep LoadBalancer
+
+# Wait for external IPs to be assigned (may take 3-5 minutes)
+echo "Waiting for LoadBalancers to get external IPs..."
+sleep 120
+
+# Check again
+kubectl get svc -A | grep LoadBalancer
+```
+
+---
+
+## 🌐 PHASE 4: GET NEW ACCESS URLS (2 minutes)
+
+### Step 8: Retrieve Updated URLs
+```bash
+# Get all new URLs (they may have changed after restart)
+echo "================================================"
+echo "🎯 UPDATED ACCESS URLS"
+echo "================================================"
+
+# Prometheus URL
+PROMETHEUS_URL=$(kubectl get svc -n prometheus prometheus-stack-kube-prom-prometheus -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+if [ -n "$PROMETHEUS_URL" ]; then
+    echo "Prometheus: http://$PROMETHEUS_URL:9090"
+else
+    echo "Prometheus: Still provisioning..."
+fi
+
+# Grafana URL
+GRAFANA_URL=$(kubectl get svc -n prometheus prometheus-stack-grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+if [ -n "$GRAFANA_URL" ]; then
+    echo "Grafana: http://$GRAFANA_URL"
+    echo "Grafana Login: admin / prom-operator"
+else
+    echo "Grafana: Still provisioning..."
+fi
+
+# ArgoCD URL
+ARGOCD_URL=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+if [ -n "$ARGOCD_URL" ]; then
+    echo "ArgoCD: https://$ARGOCD_URL"
+    echo "ArgoCD Login: admin / YsCZxl5hRYMblp5t"
+else
+    echo "ArgoCD: Still provisioning..."
+fi
+
+# Application URLs
+DEFAULT_APP_URL=$(kubectl get svc -n default amazon-prime-clone-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+if [ -n "$DEFAULT_APP_URL" ]; then
+    echo "App (Default): http://$DEFAULT_APP_URL"
+else
+    echo "App (Default): Still provisioning..."
+fi
+
+PROD_APP_URL=$(kubectl get svc -n production amazon-prime-clone-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+if [ -n "$PROD_APP_URL" ]; then
+    echo "App (Production): http://$PROD_APP_URL"
+else
+    echo "App (Production): Still provisioning..."
+fi
+
+echo "================================================"
+```
+
+### Step 9: Get Jenkins URL (If Applicable)
+```bash
+# Get Jenkins public IP (if you restarted the instance)
+JENKINS_IP=$(aws ec2 describe-instances --instance-ids i-0ca32c89a19c57520 --query 'Reservations[*].Instances[*].PublicIpAddress' --output text 2>/dev/null)
+if [ -n "$JENKINS_IP" ] && [ "$JENKINS_IP" != "None" ]; then
+    echo "Jenkins: http://$JENKINS_IP:8080"
+else
+    echo "Jenkins: Still starting up..."
+fi
+```
+
+---
+
+## ✅ PHASE 5: VERIFICATION & TESTING (5 minutes)
+
+### Step 10: Health Check All Components
+```bash
+# Check overall cluster health
+echo "=== CLUSTER HEALTH CHECK ==="
+kubectl get pods -A | grep -E "(amazon-prime-clone|grafana|argocd|prometheus)"
+
+# Check ArgoCD application status
+kubectl get applications -n argocd
+echo "✅ ArgoCD applications checked"
+
+# Test application connectivity (basic connectivity test)
+echo "=== CONNECTIVITY TEST ==="
+if [ -n "$PROD_APP_URL" ]; then
+    curl -I "http://$PROD_APP_URL" --max-time 10 || echo "App still starting..."
+else
+    echo "Waiting for production app URL..."
+fi
+```
+
+### Step 11: Verify Monitoring Stack
+```bash
+# Check Prometheus targets (if URL is available)
+if [ -n "$PROMETHEUS_URL" ]; then
+    echo "✅ Prometheus available at: http://$PROMETHEUS_URL:9090"
+    echo "💡 Check Prometheus targets: http://$PROMETHEUS_URL:9090/targets"
+else
+    echo "⏳ Prometheus still provisioning LoadBalancer..."
+fi
+
+# Check Grafana availability
+if [ -n "$GRAFANA_URL" ]; then
+    echo "✅ Grafana available at: http://$GRAFANA_URL"
+    echo "💡 Login with: admin / prom-operator"
+else
+    echo "⏳ Grafana still provisioning LoadBalancer..."
+fi
+```
+
+---
+
+## 🎯 PHASE 6: FINAL STATUS REPORT
+
+### Step 12: Generate Status Report
+```bash
+echo "================================================"
+echo "🎉 RESUME COMPLETE - STATUS REPORT"
+echo "================================================"
+echo "Timestamp: $(date)"
+echo ""
+echo "Infrastructure Status:"
+echo "✅ EKS Cluster: $(kubectl get nodes --no-headers | wc -l) nodes ready"
+echo "✅ Namespaces: $(kubectl get namespaces --no-headers | wc -l) total"
+echo "✅ Applications: $(kubectl get pods -A | grep amazon-prime-clone | grep Running | wc -l) running"
+echo "✅ ArgoCD: $(kubectl get pods -n argocd | grep Running | wc -l) pods running"
+echo "✅ Monitoring: $(kubectl get pods -n prometheus | grep Running | wc -l) pods running"
+echo ""
+echo "LoadBalancer Services:"
+kubectl get svc -A | grep LoadBalancer | wc -l | xargs echo "✅ Total LoadBalancers:"
+echo ""
+echo "Next Steps:"
+echo "1. Wait 5-10 minutes for all LoadBalancers to be fully ready"
+echo "2. Access your applications using the URLs above"
+echo "3. Check ArgoCD for application sync status"
+echo "4. Monitor application health in Grafana dashboards"
+echo "================================================"
+```
+
+---
+
+## 🚨 TROUBLESHOOTING (If Needed)
+
+### If Pods Are Not Starting:
+```bash
+# Check pod status and events
+kubectl describe pod -n production $(kubectl get pods -n production -o name | head -1)
+
+# Check for resource issues
+kubectl top nodes
+kubectl top pods -A
+```
+
+### If LoadBalancers Are Stuck:
+```bash
+# Check LoadBalancer events
+kubectl describe svc -n production amazon-prime-clone-service
+
+# If stuck, delete and recreate service
+kubectl delete svc amazon-prime-clone-service -n production
+kubectl apply -f k8s_files/service.yaml -n production
+```
+
+### If Applications Won't Start:
+```bash
+# Check deployment status
+kubectl get deployments -A
+
+# Restart deployments if needed
+kubectl rollout restart deployment amazon-prime-clone -n production
+kubectl rollout restart deployment amazon-prime-clone -n default
+```
+
+---
+
+## ⚡ QUICK RESUME (Fast Track)
+
+### If You Want to Resume Everything Quickly:
+```bash
+# One-liner resume command
+aws eks update-kubeconfig --region us-east-1 --name amazon-prime-eks && \
+kubectl scale deployment amazon-prime-clone --replicas=2 -n default && \
+kubectl scale deployment amazon-prime-clone --replicas=2 -n production && \
+kubectl scale deployment prometheus-stack-grafana --replicas=1 -n prometheus && \
+aws ec2 start-instances --instance-ids i-0ca32c89a19c57520 && \
+echo "✅ All services resuming - wait 5-10 minutes for full startup"
+
+# Wait and get URLs
+sleep 300 && kubectl get svc -A | grep LoadBalancer
+```
+
+---
+
+## 🎯 SUCCESS CHECKLIST
+
+### Resume Verification:
+- [ ] kubectl connected to EKS cluster
+- [ ] Both application deployments scaled to 2 replicas
+- [ ] Grafana deployment scaled to 1 replica
+- [ ] Jenkins instance started (if applicable)
+- [ ] All pods showing "Running" status
+- [ ] LoadBalancer services have external IPs
+- [ ] ArgoCD applications show "Healthy" status
+- [ ] Can access application URLs in browser
+- [ ] Grafana dashboards loading with data
+- [ ] Prometheus showing targets as "UP"
+
+### Ready to Continue Work:
+- [ ] All applications accessible via browser
+- [ ] Monitoring dashboards functional
+- [ ] ArgoCD GitOps workflow operational
+- [ ] Jenkins pipelines available for automation
+- [ ] Ready for next development phase
+
+**Your enterprise DevOps platform is fully restored and ready for continued work!** 🚀
