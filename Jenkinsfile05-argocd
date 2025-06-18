@@ -1,0 +1,235 @@
+pipeline {
+    agent any
+    
+    environment {
+        KUBECTL = "/usr/local/bin/kubectl"
+        AWS_REGION = "us-east-1"
+        CLUSTER_NAME = "amazon-prime-eks"
+        ARGOCD_VERSION = "v2.13.1"
+    }
+    
+    stages {
+        stage('🔄 1. Login to Cluster') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'access-key', variable: 'AWS_ACCESS_ID'),
+                        string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ID')
+                    ]) {
+                        sh """
+                            aws configure set aws_access_key_id \$AWS_ACCESS_ID
+                            aws configure set aws_secret_access_key \$AWS_SECRET_ID
+                            aws configure set region ${env.AWS_REGION}
+                            aws eks --region ${env.AWS_REGION} update-kubeconfig --name ${env.CLUSTER_NAME}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('🔄 2. Verify Cluster Access') {
+            steps {
+                script {
+                    sh """
+                        echo "Testing kubectl access..."
+                        ${env.KUBECTL} get nodes
+                        ${env.KUBECTL} get namespaces
+                        
+                        echo "Verifying monitoring stack..."
+                        ${env.KUBECTL} get pods -n prometheus | grep Running || echo "Prometheus pods status check"
+                    """
+                }
+            }        
+        }
+
+        stage('🏗️ 3. Create ArgoCD Namespace') {
+            steps {
+                script {
+                    sh """
+                        echo "Creating argocd namespace..."
+                        ${env.KUBECTL} create namespace argocd --dry-run=client -o yaml | ${env.KUBECTL} apply -f -
+                        
+                        echo "Verifying namespace creation..."
+                        ${env.KUBECTL} get namespace argocd
+                    """
+                }
+            }
+        }
+
+        stage('📦 4. Install ArgoCD') {
+            steps {
+                script {
+                    sh """
+                        echo "Installing ArgoCD ${env.ARGOCD_VERSION}..."
+                        
+                        # Download and apply ArgoCD manifest
+                        curl -sSL -o argocd-install.yaml https://raw.githubusercontent.com/argoproj/argo-cd/${env.ARGOCD_VERSION}/manifests/install.yaml
+                        
+                        # Apply the manifest
+                        ${env.KUBECTL} apply -n argocd -f argocd-install.yaml
+                        
+                        echo "ArgoCD installation initiated..."
+                        echo "Waiting for ArgoCD pods to start..."
+                        sleep 30
+                    """
+                }
+            }
+        }
+
+        stage('⏳ 5. Wait for ArgoCD Deployment') {
+            steps {
+                script {
+                    sh """
+                        echo "Waiting for ArgoCD pods to be ready..."
+                        
+                        # Wait for all ArgoCD pods to be ready (timeout 10 minutes)
+                        ${env.KUBECTL} wait --for=condition=Ready pods --all -n argocd --timeout=600s
+                        
+                        echo "Checking ArgoCD pod status..."
+                        ${env.KUBECTL} get pods -n argocd
+                    """
+                }
+            }
+        }
+
+        stage('🌐 6. Expose ArgoCD Server via LoadBalancer') {
+            steps {
+                script {
+                    sh """
+                        echo "Patching ArgoCD server service to LoadBalancer..."
+                        
+                        # Patch the argocd-server service to use LoadBalancer
+                        ${env.KUBECTL} patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+                        
+                        echo "Verifying service configuration..."
+                        ${env.KUBECTL} get svc -n argocd
+                        
+                        echo "Waiting for LoadBalancer to get external IP..."
+                        sleep 60
+                    """
+                }
+            }
+        }
+
+        stage('🔑 7. Get ArgoCD Admin Password') {
+            steps {
+                script {
+                    sh """
+                        echo "Retrieving ArgoCD admin password..."
+                        
+                        # Get the initial admin password
+                        ARGOCD_PASSWORD=\$(${env.KUBECTL} -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+                        
+                        echo "================================================"
+                        echo "🚀 ARGOCD INSTALLATION COMPLETE!"
+                        echo "================================================"
+                        echo "ArgoCD Admin Credentials:"
+                        echo "Username: admin"
+                        echo "Password: \$ARGOCD_PASSWORD"
+                        echo "================================================"
+                        
+                        # Store password for later stages
+                        echo \$ARGOCD_PASSWORD > /tmp/argocd-password.txt
+                    """
+                }
+            }
+        }
+
+        stage('🔍 8. Get ArgoCD Access URLs') {
+            steps {
+                script {
+                    sh """
+                        echo "Getting ArgoCD LoadBalancer URL..."
+                        
+                        # Get the LoadBalancer hostname
+                        ARGOCD_URL=\$(${env.KUBECTL} get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+                        
+                        if [ "\$ARGOCD_URL" != "pending" ] && [ -n "\$ARGOCD_URL" ]; then
+                            echo "================================================"
+                            echo "🎯 ARGOCD ACCESS INFORMATION:"
+                            echo "================================================"
+                            echo "ArgoCD URL: https://\$ARGOCD_URL"
+                            echo "ArgoCD URL (HTTP): http://\$ARGOCD_URL"
+                            echo ""
+                            echo "Login Credentials:"
+                            echo "Username: admin"
+                            echo "Password: \$(cat /tmp/argocd-password.txt)"
+                            echo ""
+                            echo "💡 Note: ArgoCD uses HTTPS by default with self-signed certificates"
+                            echo "💡 You may need to accept the security warning in your browser"
+                            echo "================================================"
+                        else
+                            echo "LoadBalancer still provisioning..."
+                            echo "Check AWS Console for ELB status"
+                            echo "Or run: kubectl get svc -n argocd argocd-server"
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('📋 9. Verify Installation') {
+            steps {
+                script {
+                    sh """
+                        echo "================================================"
+                        echo "🔍 ARGOCD INSTALLATION VERIFICATION"
+                        echo "================================================"
+                        
+                        echo "ArgoCD Pods:"
+                        ${env.KUBECTL} get pods -n argocd
+                        
+                        echo ""
+                        echo "ArgoCD Services:"
+                        ${env.KUBECTL} get svc -n argocd
+                        
+                        echo ""
+                        echo "All Namespaces Overview:"
+                        ${env.KUBECTL} get namespaces
+                        
+                        echo ""
+                        echo "================================================"
+                        echo "✅ VERIFICATION COMPLETE"
+                        echo "================================================"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "ArgoCD installation pipeline completed."
+                sh """
+                    # Clean up temporary files
+                    rm -f argocd-install.yaml
+                    rm -f /tmp/argocd-password.txt
+                """
+            }
+        }
+        failure {
+            script {
+                echo "ArgoCD installation failed. Check the logs for details."
+                sh """
+                    echo "Debugging information:"
+                    ${env.KUBECTL} get pods -n argocd || true
+                    ${env.KUBECTL} get events -n argocd --sort-by=.lastTimestamp || true
+                """
+            }
+        }
+        success {
+            script {
+                echo "✅ ArgoCD successfully installed!"
+                echo "🎯 Next steps:"
+                echo "1. Access ArgoCD web interface"
+                echo "2. Create Kubernetes manifests repository" 
+                echo "3. Set up your first ArgoCD application"
+                echo "4. Configure GitOps workflow for Amazon Prime Clone"
+                echo ""
+                echo "💰 Cost reminder: You now have 3 LoadBalancers running"
+                echo "📈 Achievement unlocked: Complete CI/CD pipeline with GitOps!"
+            }
+        }
+    }
+}
