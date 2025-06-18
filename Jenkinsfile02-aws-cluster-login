@@ -1,0 +1,53 @@
+pipeline {
+    agent any
+    
+    environment {
+        KUBECTL = "/usr/local/bin/kubectl"
+        AWS_REGION = "us-east-1"
+        CLUSTER_NAME = "amazon-prime-eks"
+    }
+    
+    stages {
+        stage('🔄 1. Login to Cluster') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'access-key', variable: 'AWS_ACCESS_ID'),
+                        string(credentialsId: 'secret-access-key', variable: 'AWS_SECRET_ID')
+                    ]) {
+                        sh """
+                            aws configure set aws_access_key_id \$AWS_ACCESS_ID
+                            aws configure set aws_secret_access_key \$AWS_SECRET_ID
+                            aws configure set region ${env.AWS_REGION}
+                            aws eks --region ${env.AWS_REGION} update-kubeconfig --name ${env.CLUSTER_NAME}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('🔄 2. Check Access') {
+            steps {
+                script {
+                    sh """
+                        ${env.KUBECTL} get nodes
+                        ${env.KUBECTL} get namespaces
+                    """
+                }
+            }        
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "Pipeline completed."
+            }
+        }
+        failure {
+            script {
+                echo "Pipeline failed."
+            }
+        }
+    }
+}
