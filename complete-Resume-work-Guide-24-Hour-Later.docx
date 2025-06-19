@@ -174,7 +174,7 @@ echo "================================================"
 ### Step 9: Get Jenkins URL (If Applicable)
 ```bash
 # Get Jenkins public IP (if you restarted the instance)
-JENKINS_IP=$(aws ec2 describe-instances --instance-ids i-0ca32c89a19c57520 --query 'Reservations[*].Instances[*].PublicIpAddress' --output text 2>/dev/null)
+JENKINS_IP=$(aws ec2 describe-instances --instance-ids i-09bf8f01952ecad1b --query 'Reservations[*].Instances[*].PublicIpAddress' --output text 2>/dev/null)
 if [ -n "$JENKINS_IP" ] && [ "$JENKINS_IP" != "None" ]; then
     echo "Jenkins: http://$JENKINS_IP:8080"
 else

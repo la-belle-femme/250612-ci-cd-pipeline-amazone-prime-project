@@ -73,7 +73,7 @@ kubectl get svc -A | grep LoadBalancer
 ### Step 6: Stop Jenkins Instance (Optional - Saves ~$0.05/hour)
 ```bash
 # Stop the Jenkins EC2 instance (optional additional savings)
-aws ec2 stop-instances --instance-ids i-0ca32c89a19c57520
+aws ec2 stop-instances --instance-ids i-09bf8f01952ecad1b
 echo "✅ Jenkins instance stopped"
 ```
 
