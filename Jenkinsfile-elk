@@ -1,0 +1,561 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  containers:
+                  - name: kubectl
+                    image: bitnami/kubectl:latest
+                    command:
+                    - cat
+                    tty: true
+                  - name: helm
+                    image: alpine/helm:3.13.0
+                    command:
+                    - cat
+                    tty: true
+                  - name: aws-cli
+                    image: amazon/aws-cli:latest
+                    command:
+                    - cat
+                    tty: true
+            """
+        }
+    }
+    
+    environment {
+        // EKS Configuration
+        EKS_CLUSTER_NAME = "${params.EKS_CLUSTER_NAME ?: 'your-eks-cluster'}"
+        AWS_REGION = "${params.AWS_REGION ?: 'us-east-1'}"
+        NAMESPACE = "${params.NAMESPACE ?: 'elastic-stack'}"
+        
+        // Elasticsearch Configuration
+        ES_VERSION = "${params.ES_VERSION ?: '8.11.0'}"
+        ES_REPLICAS = "${params.ES_REPLICAS ?: '3'}"
+        ES_STORAGE_SIZE = "${params.ES_STORAGE_SIZE ?: '100Gi'}"
+        ES_MEMORY_LIMIT = "${params.ES_MEMORY_LIMIT ?: '4Gi'}"
+        
+        // Kibana Configuration
+        KIBANA_VERSION = "${params.KIBANA_VERSION ?: '8.11.0'}"
+        KIBANA_REPLICAS = "${params.KIBANA_REPLICAS ?: '2'}"
+        KIBANA_MEMORY_LIMIT = "${params.KIBANA_MEMORY_LIMIT ?: '4Gi'}"
+        KIBANA_DOMAIN = "${params.KIBANA_DOMAIN ?: 'kibana.yourdomain.com'}"
+        
+        // Deployment Configuration
+        DEPLOYMENT_MODE = "${params.DEPLOYMENT_MODE ?: 'full-stack'}"  // full-stack, elasticsearch-only, kibana-only
+        ENABLE_SSL = "${params.ENABLE_SSL ?: 'false'}"
+        ACM_CERT_ARN = "${params.ACM_CERT_ARN ?: ''}"
+        
+        // Security
+        ES_PASSWORD = credentials('elasticsearch-password')
+        KIBANA_ENCRYPTION_KEY = credentials('kibana-encryption-key')
+    }
+    
+    parameters {
+        choice(
+            name: 'DEPLOYMENT_MODE',
+            choices: ['full-stack', 'elasticsearch-only', 'kibana-only'],
+            description: 'What to deploy'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['deploy', 'upgrade', 'rollback', 'uninstall'],
+            description: 'Deployment action'
+        )
+        string(
+            name: 'EKS_CLUSTER_NAME',
+            defaultValue: 'your-eks-cluster',
+            description: 'EKS cluster name'
+        )
+        string(
+            name: 'KIBANA_DOMAIN',
+            defaultValue: 'kibana.yourdomain.com',
+            description: 'Kibana domain name'
+        )
+        booleanParam(
+            name: 'ENABLE_SSL',
+            defaultValue: false,
+            description: 'Enable SSL/TLS with ACM certificate'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Perform dry run without actual deployment'
+        )
+    }
+    
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    echo "🚀 Starting ELK Stack Deployment Pipeline"
+                    echo "Cluster: ${EKS_CLUSTER_NAME}"
+                    echo "Namespace: ${NAMESPACE}"
+                    echo "Mode: ${DEPLOYMENT_MODE}"
+                    echo "Action: ${params.ACTION}"
+                }
+            }
+        }
+        
+        stage('Prerequisites Check') {
+            parallel {
+                stage('AWS Configuration') {
+                    steps {
+                        container('aws-cli') {
+                            script {
+                                sh """
+                                    echo "🔍 Checking AWS connectivity..."
+                                    aws sts get-caller-identity
+                                    aws eks describe-cluster --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                                """
+                            }
+                        }
+                    }
+                }
+                
+                stage('Kubernetes Connectivity') {
+                    steps {
+                        container('kubectl') {
+                            script {
+                                sh """
+                                    echo "🔍 Checking Kubernetes connectivity..."
+                                    aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                                    kubectl cluster-info
+                                    kubectl get nodes
+                                    kubectl get storageclass
+                                """
+                            }
+                        }
+                    }
+                }
+                
+                stage('Helm Setup') {
+                    steps {
+                        container('helm') {
+                            script {
+                                sh """
+                                    echo "🔍 Setting up Helm repositories..."
+                                    helm repo add elastic https://helm.elastic.co
+                                    helm repo update
+                                    helm version
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Namespace & Secrets') {
+            when {
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                container('kubectl') {
+                    script {
+                        sh """
+                            echo "🏗️ Creating namespace and secrets..."
+                            kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                            
+                            # Create Elasticsearch password secret
+                            kubectl create secret generic elasticsearch-master-credentials \\
+                                --from-literal=password=\${ES_PASSWORD} \\
+                                -n ${NAMESPACE} \\
+                                --dry-run=client -o yaml | kubectl apply -f -
+                            
+                            # Create Kibana encryption key secret
+                            kubectl create secret generic kibana-encryption-key \\
+                                --from-literal=encryptionkey=\${KIBANA_ENCRYPTION_KEY} \\
+                                -n ${NAMESPACE} \\
+                                --dry-run=client -o yaml | kubectl apply -f -
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy Elasticsearch') {
+            when {
+                anyOf {
+                    expression { DEPLOYMENT_MODE == 'full-stack' }
+                    expression { DEPLOYMENT_MODE == 'elasticsearch-only' }
+                }
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                container('helm') {
+                    script {
+                        writeFile file: 'elasticsearch-values.yaml', text: """
+# Elasticsearch Values for EKS Production
+clusterName: "elasticsearch"
+nodeGroup: "master"
+
+roles:
+  master: "true"
+  ingest: "true"
+  data: "true"
+  remote_cluster_client: "true"
+
+replicas: ${ES_REPLICAS}
+
+image: "docker.elastic.co/elasticsearch/elasticsearch"
+imageTag: "${ES_VERSION}"
+
+resources:
+  requests:
+    cpu: "1000m"
+    memory: "2Gi"
+  limits:
+    cpu: "2000m"
+    memory: "${ES_MEMORY_LIMIT}"
+
+esJavaOpts: "-Xmx2g -Xms2g"
+
+volumeClaimTemplate:
+  accessModes: [ "ReadWriteOnce" ]
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: "${ES_STORAGE_SIZE}"
+
+service:
+  type: ClusterIP
+
+secret:
+  enabled: true
+  password: "changeme"
+
+esConfig:
+  elasticsearch.yml: |
+    cluster.name: "elasticsearch"
+    network.host: 0.0.0.0
+    discovery.seed_hosts: "elasticsearch-master-headless"
+    cluster.initial_master_nodes: "elasticsearch-master-0,elasticsearch-master-1,elasticsearch-master-2"
+    indices.memory.index_buffer_size: 20%
+    xpack.security.enabled: true
+    xpack.security.transport.ssl.enabled: true
+    xpack.security.transport.ssl.verification_mode: certificate
+    xpack.security.transport.ssl.client_authentication: required
+    xpack.security.transport.ssl.keystore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
+    xpack.security.transport.ssl.truststore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
+    xpack.security.http.ssl.enabled: false
+
+antiAffinity: "hard"
+maxUnavailable: 1
+
+extraEnvs:
+  - name: ELASTIC_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: elasticsearch-master-credentials
+        key: password
+"""
+                        
+                        if (params.DRY_RUN) {
+                            sh """
+                                echo "🧪 DRY RUN: Elasticsearch deployment"
+                                helm template elasticsearch elastic/elasticsearch \\
+                                    -f elasticsearch-values.yaml \\
+                                    -n ${NAMESPACE} \\
+                                    --version ${ES_VERSION}
+                            """
+                        } else {
+                            sh """
+                                echo "🚀 Deploying Elasticsearch..."
+                                helm upgrade --install elasticsearch elastic/elasticsearch \\
+                                    -f elasticsearch-values.yaml \\
+                                    -n ${NAMESPACE} \\
+                                    --version ${ES_VERSION} \\
+                                    --timeout 15m \\
+                                    --wait
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Elasticsearch') {
+            when {
+                anyOf {
+                    expression { DEPLOYMENT_MODE == 'full-stack' }
+                    expression { DEPLOYMENT_MODE == 'elasticsearch-only' }
+                }
+                not { params.DRY_RUN }
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                container('kubectl') {
+                    script {
+                        sh """
+                            echo "🔍 Verifying Elasticsearch deployment..."
+                            kubectl wait --for=condition=ready pod -l app=elasticsearch-master \\
+                                -n ${NAMESPACE} --timeout=600s
+                            
+                            kubectl get pods -n ${NAMESPACE} -l app=elasticsearch-master
+                            
+                            # Test Elasticsearch health
+                            kubectl exec -n ${NAMESPACE} elasticsearch-master-0 -- \\
+                                curl -u "elastic:\${ES_PASSWORD}" \\
+                                -H "Content-Type: application/json" \\
+                                http://localhost:9200/_cluster/health?pretty
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy Kibana') {
+            when {
+                anyOf {
+                    expression { DEPLOYMENT_MODE == 'full-stack' }
+                    expression { DEPLOYMENT_MODE == 'kibana-only' }
+                }
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                container('helm') {
+                    script {
+                        def sslConfig = ""
+                        if (params.ENABLE_SSL && ACM_CERT_ARN) {
+                            sslConfig = """
+    alb.ingress.kubernetes.io/certificate-arn: "${ACM_CERT_ARN}"
+    alb.ingress.kubernetes.io/ssl-redirect: '443'"""
+                        }
+                        
+                        writeFile file: 'kibana-values.yaml', text: """
+# Kibana Values for EKS Production
+elasticsearchHosts: "http://elasticsearch-master:9200"
+
+replicas: ${KIBANA_REPLICAS}
+
+image: "docker.elastic.co/kibana/kibana"
+imageTag: "${KIBANA_VERSION}"
+
+resources:
+  requests:
+    cpu: "1000m"
+    memory: "2Gi"
+  limits:
+    cpu: "2000m"
+    memory: "${KIBANA_MEMORY_LIMIT}"
+
+service:
+  type: ClusterIP
+  port: 5601
+
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /api/status${sslConfig}
+  hosts:
+    - host: "${KIBANA_DOMAIN}"
+      paths:
+        - path: /
+          pathType: Prefix
+
+extraEnvs:
+  - name: "ELASTICSEARCH_USERNAME"
+    value: "elastic"
+  - name: "ELASTICSEARCH_PASSWORD"
+    valueFrom:
+      secretKeyRef:
+        name: elasticsearch-master-credentials
+        key: password
+  - name: "XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY"
+    valueFrom:
+      secretKeyRef:
+        name: kibana-encryption-key
+        key: encryptionkey
+  - name: "NODE_OPTIONS"
+    value: "--max-old-space-size=3584"
+
+kibanaConfig:
+  kibana.yml: |
+    server.name: "kibana"
+    server.host: "0.0.0.0"
+    server.publicBaseUrl: "https://${KIBANA_DOMAIN}"
+    elasticsearch.hosts: ["http://elasticsearch-master:9200"]
+    elasticsearch.username: "\${ELASTICSEARCH_USERNAME}"
+    elasticsearch.password: "\${ELASTICSEARCH_PASSWORD}"
+    xpack.security.encryptionKey: "\${XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY}"
+    elasticsearch.requestTimeout: 90000
+    ops.interval: 30000
+    logging.root.level: warn
+    data.search.aggs.shardDelay.enabled: true
+    xpack.monitoring.kibana.collection.enabled: true
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: "gp3"
+
+antiAffinity: "soft"
+"""
+                        
+                        if (params.DRY_RUN) {
+                            sh """
+                                echo "🧪 DRY RUN: Kibana deployment"
+                                helm template kibana elastic/kibana \\
+                                    -f kibana-values.yaml \\
+                                    -n ${NAMESPACE} \\
+                                    --version ${KIBANA_VERSION}
+                            """
+                        } else {
+                            sh """
+                                echo "🚀 Deploying Kibana..."
+                                helm upgrade --install kibana elastic/kibana \\
+                                    -f kibana-values.yaml \\
+                                    -n ${NAMESPACE} \\
+                                    --version ${KIBANA_VERSION} \\
+                                    --timeout 10m \\
+                                    --wait
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Kibana') {
+            when {
+                anyOf {
+                    expression { DEPLOYMENT_MODE == 'full-stack' }
+                    expression { DEPLOYMENT_MODE == 'kibana-only' }
+                }
+                not { params.DRY_RUN }
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                container('kubectl') {
+                    script {
+                        sh """
+                            echo "🔍 Verifying Kibana deployment..."
+                            kubectl wait --for=condition=ready pod -l app=kibana \\
+                                -n ${NAMESPACE} --timeout=300s
+                            
+                            kubectl get pods -n ${NAMESPACE} -l app=kibana
+                            kubectl get ingress -n ${NAMESPACE}
+                            
+                            # Get access information
+                            echo "📋 Deployment Summary:"
+                            echo "Namespace: ${NAMESPACE}"
+                            echo "Kibana URL: https://${KIBANA_DOMAIN}"
+                            echo "Username: elastic"
+                            echo "Password: \${ES_PASSWORD}"
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Rollback') {
+            when {
+                expression { params.ACTION == 'rollback' }
+            }
+            steps {
+                container('helm') {
+                    script {
+                        sh """
+                            echo "🔄 Rolling back deployments..."
+                            if [ "${DEPLOYMENT_MODE}" != "elasticsearch-only" ]; then
+                                helm rollback kibana -n ${NAMESPACE}
+                            fi
+                            if [ "${DEPLOYMENT_MODE}" != "kibana-only" ]; then
+                                helm rollback elasticsearch -n ${NAMESPACE}
+                            fi
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Uninstall') {
+            when {
+                expression { params.ACTION == 'uninstall' }
+            }
+            steps {
+                container('helm') {
+                    script {
+                        sh """
+                            echo "🗑️ Uninstalling ELK stack..."
+                            if [ "${DEPLOYMENT_MODE}" != "elasticsearch-only" ]; then
+                                helm uninstall kibana -n ${NAMESPACE} || true
+                            fi
+                            if [ "${DEPLOYMENT_MODE}" != "kibana-only" ]; then
+                                helm uninstall elasticsearch -n ${NAMESPACE} || true
+                            fi
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                if (!params.DRY_RUN && params.ACTION != 'uninstall') {
+                    container('kubectl') {
+                        sh """
+                            echo "📊 Final Status Check:"
+                            kubectl get all -n ${NAMESPACE} || true
+                        """
+                    }
+                }
+            }
+        }
+        success {
+            echo "✅ ELK Stack deployment completed successfully!"
+            script {
+                if (!params.DRY_RUN && (params.ACTION == 'deploy' || params.ACTION == 'upgrade')) {
+                    echo """
+🎉 Deployment Successful!
+
+Access Information:
+- Kibana URL: https://${KIBANA_DOMAIN}
+- Username: elastic  
+- Password: Check Jenkins credentials 'elasticsearch-password'
+- Namespace: ${NAMESPACE}
+
+Next Steps:
+1. Configure user authentication
+2. Set up index patterns
+3. Create dashboards for your 50 users
+4. Configure data retention policies
+                    """
+                }
+            }
+        }
+        failure {
+            echo "❌ ELK Stack deployment failed!"
+            container('kubectl') {
+                sh """
+                    echo "🔍 Debugging information:"
+                    kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' || true
+                    kubectl get pods -n ${NAMESPACE} -o wide || true
+                """
+            }
+        }
+    }
+}
