@@ -27,7 +27,7 @@ pipeline {
     
     environment {
         // EKS Configuration
-        EKS_CLUSTER_NAME = "${params.EKS_CLUSTER_NAME ?: 'your-eks-cluster'}"
+        EKS_CLUSTER_NAME = "${params.EKS_CLUSTER_NAME ?: 'amazon-prime-eks'}"
         AWS_REGION = "${params.AWS_REGION ?: 'us-east-1'}"
         NAMESPACE = "${params.NAMESPACE ?: 'elastic-stack'}"
         
@@ -44,7 +44,7 @@ pipeline {
         KIBANA_DOMAIN = "${params.KIBANA_DOMAIN ?: 'kibana.yourdomain.com'}"
         
         // Deployment Configuration
-        DEPLOYMENT_MODE = "${params.DEPLOYMENT_MODE ?: 'full-stack'}"  // full-stack, elasticsearch-only, kibana-only
+        DEPLOYMENT_MODE = "${params.DEPLOYMENT_MODE ?: 'full-stack'}"
         ENABLE_SSL = "${params.ENABLE_SSL ?: 'false'}"
         ACM_CERT_ARN = "${params.ACM_CERT_ARN ?: ''}"
         
@@ -66,7 +66,7 @@ pipeline {
         )
         string(
             name: 'EKS_CLUSTER_NAME',
-            defaultValue: 'your-eks-cluster',
+            defaultValue: 'amazon-prime-eks',
             description: 'EKS cluster name'
         )
         string(
@@ -81,7 +81,7 @@ pipeline {
         )
         booleanParam(
             name: 'DRY_RUN',
-            defaultValue: false,
+            defaultValue: true,
             description: 'Perform dry run without actual deployment'
         )
     }
@@ -95,6 +95,7 @@ pipeline {
                     echo "Namespace: ${NAMESPACE}"
                     echo "Mode: ${DEPLOYMENT_MODE}"
                     echo "Action: ${params.ACTION}"
+                    echo "Dry Run: ${params.DRY_RUN}"
                 }
             }
         }
@@ -181,13 +182,15 @@ pipeline {
         
         stage('Deploy Elasticsearch') {
             when {
-                anyOf {
-                    expression { DEPLOYMENT_MODE == 'full-stack' }
-                    expression { DEPLOYMENT_MODE == 'elasticsearch-only' }
-                }
-                anyOf {
-                    expression { params.ACTION == 'deploy' }
-                    expression { params.ACTION == 'upgrade' }
+                allOf {
+                    anyOf {
+                        expression { DEPLOYMENT_MODE == 'full-stack' }
+                        expression { DEPLOYMENT_MODE == 'elasticsearch-only' }
+                    }
+                    anyOf {
+                        expression { params.ACTION == 'deploy' }
+                        expression { params.ACTION == 'upgrade' }
+                    }
                 }
             }
             steps {
@@ -285,14 +288,16 @@ extraEnvs:
         
         stage('Verify Elasticsearch') {
             when {
-                anyOf {
-                    expression { DEPLOYMENT_MODE == 'full-stack' }
-                    expression { DEPLOYMENT_MODE == 'elasticsearch-only' }
-                }
-                not { params.DRY_RUN }
-                anyOf {
-                    expression { params.ACTION == 'deploy' }
-                    expression { params.ACTION == 'upgrade' }
+                allOf {
+                    anyOf {
+                        expression { DEPLOYMENT_MODE == 'full-stack' }
+                        expression { DEPLOYMENT_MODE == 'elasticsearch-only' }
+                    }
+                    expression { !params.DRY_RUN }
+                    anyOf {
+                        expression { params.ACTION == 'deploy' }
+                        expression { params.ACTION == 'upgrade' }
+                    }
                 }
             }
             steps {
@@ -318,13 +323,15 @@ extraEnvs:
         
         stage('Deploy Kibana') {
             when {
-                anyOf {
-                    expression { DEPLOYMENT_MODE == 'full-stack' }
-                    expression { DEPLOYMENT_MODE == 'kibana-only' }
-                }
-                anyOf {
-                    expression { params.ACTION == 'deploy' }
-                    expression { params.ACTION == 'upgrade' }
+                allOf {
+                    anyOf {
+                        expression { DEPLOYMENT_MODE == 'full-stack' }
+                        expression { DEPLOYMENT_MODE == 'kibana-only' }
+                    }
+                    anyOf {
+                        expression { params.ACTION == 'deploy' }
+                        expression { params.ACTION == 'upgrade' }
+                    }
                 }
             }
             steps {
@@ -436,14 +443,16 @@ antiAffinity: "soft"
         
         stage('Verify Kibana') {
             when {
-                anyOf {
-                    expression { DEPLOYMENT_MODE == 'full-stack' }
-                    expression { DEPLOYMENT_MODE == 'kibana-only' }
-                }
-                not { params.DRY_RUN }
-                anyOf {
-                    expression { params.ACTION == 'deploy' }
-                    expression { params.ACTION == 'upgrade' }
+                allOf {
+                    anyOf {
+                        expression { DEPLOYMENT_MODE == 'full-stack' }
+                        expression { DEPLOYMENT_MODE == 'kibana-only' }
+                    }
+                    expression { !params.DRY_RUN }
+                    anyOf {
+                        expression { params.ACTION == 'deploy' }
+                        expression { params.ACTION == 'upgrade' }
+                    }
                 }
             }
             steps {
