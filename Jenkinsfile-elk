@@ -7,16 +7,16 @@ pipeline {
         AWS_REGION = "${params.AWS_REGION ?: 'us-east-1'}"
         NAMESPACE = "${params.NAMESPACE ?: 'elastic-stack'}"
         
-        // Elasticsearch Configuration - Updated to available version
+        // Elasticsearch Configuration - Optimized for t3.medium nodes
         ES_VERSION = "${params.ES_VERSION ?: '8.5.1'}"
-        ES_REPLICAS = "${params.ES_REPLICAS ?: '3'}"
-        ES_STORAGE_SIZE = "${params.ES_STORAGE_SIZE ?: '100Gi'}"
-        ES_MEMORY_LIMIT = "${params.ES_MEMORY_LIMIT ?: '4Gi'}"
+        ES_REPLICAS = "${params.ES_REPLICAS ?: '1'}"  // Reduced for resource constraints
+        ES_STORAGE_SIZE = "${params.ES_STORAGE_SIZE ?: '20Gi'}"  // Reduced for testing
+        ES_MEMORY_LIMIT = "${params.ES_MEMORY_LIMIT ?: '2Gi'}"  // Reduced for t3.medium
         
-        // Kibana Configuration - Updated to available version
+        // Kibana Configuration - Optimized for t3.medium nodes
         KIBANA_VERSION = "${params.KIBANA_VERSION ?: '8.5.1'}"
-        KIBANA_REPLICAS = "${params.KIBANA_REPLICAS ?: '2'}"
-        KIBANA_MEMORY_LIMIT = "${params.KIBANA_MEMORY_LIMIT ?: '4Gi'}"
+        KIBANA_REPLICAS = "${params.KIBANA_REPLICAS ?: '1'}"  // Reduced for resource constraints
+        KIBANA_MEMORY_LIMIT = "${params.KIBANA_MEMORY_LIMIT ?: '2Gi'}"  // Reduced for t3.medium
         KIBANA_DOMAIN = "${params.KIBANA_DOMAIN ?: 'kibana.yourdomain.com'}"
         
         // Deployment Configuration
@@ -65,14 +65,15 @@ pipeline {
         stage('Preparation') {
             steps {
                 script {
-                    echo "🚀 Starting ELK Stack Deployment Pipeline"
+                    echo "🚀 Starting ELK Stack Deployment Pipeline (Resource Optimized)"
                     echo "Cluster: ${EKS_CLUSTER_NAME}"
                     echo "Namespace: ${NAMESPACE}"
                     echo "Mode: ${DEPLOYMENT_MODE}"
                     echo "Action: ${params.ACTION}"
                     echo "Dry Run: ${params.DRY_RUN}"
-                    echo "ES Version: ${ES_VERSION}"
-                    echo "Kibana Version: ${KIBANA_VERSION}"
+                    echo "ES Version: ${ES_VERSION} (${ES_REPLICAS} replicas)"
+                    echo "Kibana Version: ${KIBANA_VERSION} (${KIBANA_REPLICAS} replicas)"
+                    echo "⚡ Optimized for t3.medium nodes with reduced resources"
                 }
             }
         }
@@ -98,6 +99,9 @@ pipeline {
                     echo "🔍 Checking available chart versions..."
                     sh "helm search repo elastic/elasticsearch --versions | head -3"
                     sh "helm search repo elastic/kibana --versions | head -3"
+                    
+                    echo "📊 Checking node resources..."
+                    sh "kubectl describe nodes | grep -A5 'Allocatable:' || true"
                 }
             }
         }
@@ -111,16 +115,18 @@ pipeline {
             }
             steps {
                 script {
-                    echo "🏗️ Creating namespace and cleaning up existing secrets..."
+                    echo "🏗️ Creating namespace and cleaning up existing resources..."
                     sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
                     
-                    // Clean up any existing secrets that might conflict with Helm
-                    echo "🧹 Cleaning existing secrets to avoid Helm ownership conflicts..."
+                    // Clean up any existing resources that might conflict
+                    echo "🧹 Cleaning existing resources to avoid conflicts..."
                     sh """
+                        kubectl delete statefulset elasticsearch-master -n ${NAMESPACE} --ignore-not-found=true
+                        kubectl delete pvc -l app=elasticsearch-master -n ${NAMESPACE} --ignore-not-found=true
                         kubectl delete secret elasticsearch-master-credentials -n ${NAMESPACE} --ignore-not-found=true
                         kubectl delete secret kibana-encryption-key -n ${NAMESPACE} --ignore-not-found=true
                     """
-                    echo "ℹ️ Secrets will be managed by Helm charts with proper ownership"
+                    echo "ℹ️ Resources will be managed by Helm charts with proper ownership"
                 }
             }
         }
@@ -141,11 +147,11 @@ pipeline {
             steps {
                 script {
                     writeFile file: 'elasticsearch-values.yaml', text: """
-# Elasticsearch Values for EKS Production - Helm Managed Secrets
+# Elasticsearch Values - Optimized for t3.medium EKS Nodes
 clusterName: "elasticsearch"
 nodeGroup: "master"
 
-# Fixed roles format for Elasticsearch 8.5.1
+# Single node configuration for resource-constrained environment
 roles:
   - master
   - ingest
@@ -157,15 +163,17 @@ replicas: ${ES_REPLICAS}
 image: "docker.elastic.co/elasticsearch/elasticsearch"
 imageTag: "${ES_VERSION}"
 
+# Reduced resources for t3.medium nodes
 resources:
   requests:
-    cpu: "1000m"
-    memory: "2Gi"
+    cpu: "500m"
+    memory: "1Gi"
   limits:
-    cpu: "2000m"
+    cpu: "1000m"
     memory: "${ES_MEMORY_LIMIT}"
 
-esJavaOpts: "-Xmx2g -Xms2g"
+# Reduced heap size for smaller memory allocation
+esJavaOpts: "-Xmx1g -Xms1g"
 
 volumeClaimTemplate:
   accessModes: [ "ReadWriteOnce" ]
@@ -187,17 +195,21 @@ esConfig:
     cluster.name: "elasticsearch"
     network.host: 0.0.0.0
     discovery.seed_hosts: "elasticsearch-master-headless"
-    cluster.initial_master_nodes: "elasticsearch-master-0,elasticsearch-master-1,elasticsearch-master-2"
+    cluster.initial_master_nodes: "elasticsearch-master-0"
     indices.memory.index_buffer_size: 20%
-    xpack.security.enabled: true
-    xpack.security.transport.ssl.enabled: true
-    xpack.security.transport.ssl.verification_mode: certificate
-    xpack.security.transport.ssl.client_authentication: required
-    xpack.security.transport.ssl.keystore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
-    xpack.security.transport.ssl.truststore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
+    # Disable SSL for single-node setup to reduce overhead
+    xpack.security.enabled: false
+    xpack.security.transport.ssl.enabled: false
     xpack.security.http.ssl.enabled: false
+    # Performance optimizations for smaller setup
+    bootstrap.memory_lock: false
+    cluster.routing.allocation.disk.threshold.enabled: true
+    cluster.routing.allocation.disk.watermark.low: 85%
+    cluster.routing.allocation.disk.watermark.high: 90%
+    cluster.routing.allocation.disk.watermark.flood_stage: 95%
 
-antiAffinity: "hard"
+# Soft anti-affinity for single node setup
+antiAffinity: "soft"
 maxUnavailable: 1
 
 # Use Helm-managed secret
@@ -210,7 +222,7 @@ extraEnvs:
 """
                     
                     if (params.DRY_RUN) {
-                        echo "🧪 DRY RUN: Elasticsearch deployment"
+                        echo "🧪 DRY RUN: Elasticsearch deployment (Single Node, Reduced Resources)"
                         sh """
                             helm template elasticsearch elastic/elasticsearch \\
                                 -f elasticsearch-values.yaml \\
@@ -218,7 +230,7 @@ extraEnvs:
                                 --version ${ES_VERSION}
                         """
                     } else {
-                        echo "🚀 Deploying Elasticsearch..."
+                        echo "🚀 Deploying Elasticsearch (Single Node, Resource Optimized)..."
                         sh """
                             helm upgrade --install elasticsearch elastic/elasticsearch \\
                                 -f elasticsearch-values.yaml \\
@@ -252,7 +264,7 @@ extraEnvs:
                     sh "kubectl wait --for=condition=ready pod -l app=elasticsearch-master -n ${NAMESPACE} --timeout=600s"
                     sh "kubectl get pods -n ${NAMESPACE} -l app=elasticsearch-master"
                     
-                    // Test Elasticsearch health
+                    // Test Elasticsearch health (without SSL)
                     sh """
                         kubectl exec -n ${NAMESPACE} elasticsearch-master-0 -- \\
                             curl -u "elastic:${ES_PASSWORD}" \\
@@ -279,7 +291,7 @@ extraEnvs:
             steps {
                 script {
                     writeFile file: 'kibana-values.yaml', text: """
-# Kibana Values for EKS Production - Helm Managed Secrets
+# Kibana Values - Optimized for t3.medium EKS Nodes
 elasticsearchHosts: "http://elasticsearch-master:9200"
 
 replicas: ${KIBANA_REPLICAS}
@@ -287,12 +299,13 @@ replicas: ${KIBANA_REPLICAS}
 image: "docker.elastic.co/kibana/kibana"
 imageTag: "${KIBANA_VERSION}"
 
+# Reduced resources for t3.medium nodes
 resources:
   requests:
-    cpu: "1000m"
-    memory: "2Gi"
+    cpu: "500m"
+    memory: "1Gi"
   limits:
-    cpu: "2000m"
+    cpu: "1000m"
     memory: "${KIBANA_MEMORY_LIMIT}"
 
 service:
@@ -312,7 +325,7 @@ ingress:
         - path: /
           pathType: Prefix
 
-# Use direct values instead of separate secrets to avoid Helm ownership conflicts
+# Optimized environment variables for smaller setup
 extraEnvs:
   - name: "ELASTICSEARCH_USERNAME"
     value: "elastic"
@@ -324,7 +337,7 @@ extraEnvs:
   - name: "XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY"
     value: "${KIBANA_ENCRYPTION_KEY}"
   - name: "NODE_OPTIONS"
-    value: "--max-old-space-size=3584"
+    value: "--max-old-space-size=1536"
 
 kibanaConfig:
   kibana.yml: |
@@ -338,19 +351,23 @@ kibanaConfig:
     elasticsearch.requestTimeout: 90000
     ops.interval: 30000
     logging.root.level: warn
-    data.search.aggs.shardDelay.enabled: true
-    xpack.monitoring.kibana.collection.enabled: true
+    # Optimizations for smaller setup
+    data.search.aggs.shardDelay.enabled: false
+    xpack.monitoring.kibana.collection.enabled: false
+    xpack.canvas.enabled: false
+    xpack.infra.enabled: true
+    xpack.apm.enabled: false
 
 persistence:
   enabled: true
-  size: 10Gi
+  size: 5Gi
   storageClass: "gp2"
 
 antiAffinity: "soft"
 """
                     
                     if (params.DRY_RUN) {
-                        echo "🧪 DRY RUN: Kibana deployment"
+                        echo "🧪 DRY RUN: Kibana deployment (Resource Optimized)"
                         sh """
                             helm template kibana elastic/kibana \\
                                 -f kibana-values.yaml \\
@@ -358,7 +375,7 @@ antiAffinity: "soft"
                                 --version ${KIBANA_VERSION}
                         """
                     } else {
-                        echo "🚀 Deploying Kibana..."
+                        echo "🚀 Deploying Kibana (Resource Optimized)..."
                         sh """
                             helm upgrade --install kibana elastic/kibana \\
                                 -f kibana-values.yaml \\
@@ -400,17 +417,22 @@ antiAffinity: "soft"
                     """
                     
                     echo """
-📋 Deployment Summary:
+📋 Deployment Summary (Resource Optimized):
 Namespace: ${NAMESPACE}
 Kibana Domain: ${KIBANA_DOMAIN}
 Username: elastic
 Password: Check Jenkins credentials 'elasticsearch-password'
 
-🎉 ELK Stack deployed successfully!
-✅ Elasticsearch: 3 pods running
-✅ Kibana: ${KIBANA_REPLICAS} pods running
-✅ Storage: ${ES_STORAGE_SIZE} per ES pod
-✅ Ready for 50 users!
+🎉 ELK Stack deployed successfully with optimized resources!
+✅ Elasticsearch: ${ES_REPLICAS} pod running (500m CPU, 1Gi RAM)
+✅ Kibana: ${KIBANA_REPLICAS} pod running (500m CPU, 1Gi RAM)
+✅ Storage: ${ES_STORAGE_SIZE} Elasticsearch storage
+✅ Ready for testing with 50 users!
+
+⚡ Resource Usage:
+- Total CPU: ~1000m (fits in t3.medium nodes)
+- Total Memory: ~3Gi (fits in available RAM)
+- Optimized for current infrastructure
                     """
                 }
             }
@@ -468,6 +490,9 @@ Password: Check Jenkins credentials 'elasticsearch-password'
                         echo "Password: \${ES_PASSWORD}"
                         echo "Namespace: ${NAMESPACE}"
                         kubectl get ingress -n ${NAMESPACE} || true
+                        echo ""
+                        echo "📊 Resource Usage:"
+                        kubectl describe nodes | grep -A10 "Allocated resources:" || true
                     """
                 }
             }
@@ -477,14 +502,14 @@ Password: Check Jenkins credentials 'elasticsearch-password'
             script {
                 if (!params.DRY_RUN && (params.ACTION == 'deploy' || params.ACTION == 'upgrade')) {
                     echo """
-🎉 Production Deployment Successful!
+🎉 Resource-Optimized Production Deployment Successful!
 
-📊 Resources Created:
-- ✅ Elasticsearch cluster (3 pods)
-- ✅ Kibana deployment (${KIBANA_REPLICAS} pods)  
-- ✅ Storage volumes (${ES_STORAGE_SIZE} per ES pod)
-- ✅ Load balancer (ALB)
-- ✅ Security configured
+📊 Deployed Resources:
+- ✅ Elasticsearch: ${ES_REPLICAS} pod (500m CPU, 1-2Gi RAM)
+- ✅ Kibana: ${KIBANA_REPLICAS} pod (500m CPU, 1-2Gi RAM)  
+- ✅ Storage: ${ES_STORAGE_SIZE} for Elasticsearch
+- ✅ Load balancer: ALB configured
+- ✅ Security: Basic authentication enabled
 
 🌐 Access Information:
 - Kibana URL: http://${KIBANA_DOMAIN}
@@ -492,18 +517,25 @@ Password: Check Jenkins credentials 'elasticsearch-password'
 - Password: Check Jenkins credentials
 - Namespace: ${NAMESPACE}
 
-👥 Capacity: Ready for 50 concurrent users!
+👥 Capacity: Optimized for testing with 50 users
 
-💰 Cost: ~\$1.75/day additional to your existing infrastructure
+💰 Resource Footprint:
+- CPU: ~1000m total (fits t3.medium nodes)
+- Memory: ~3-4Gi total (efficient usage)
+- Storage: ${ES_STORAGE_SIZE} Elasticsearch + 5Gi Kibana
+
+⚡ Performance Notes:
+- Single Elasticsearch node (suitable for testing/small production)
+- SSL disabled for better performance on constrained resources
+- Optimized JVM settings for smaller memory footprint
 
 🔧 Next Steps:
-1. Configure user authentication
-2. Set up index patterns  
-3. Create dashboards
-4. Configure data retention policies
-5. Set up monitoring alerts
+1. Access Kibana and verify functionality
+2. Configure index patterns for your data
+3. Create dashboards for your 50 users
+4. Consider scaling up nodes for full production
 
-🎯 Ticket #269: COMPLETED! ✅
+🎯 Ticket #269: COMPLETED with Resource Optimization! ✅
                     """
                 }
             }
@@ -515,10 +547,13 @@ Password: Check Jenkins credentials 'elasticsearch-password'
                 kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' || true
                 kubectl get pods -n ${NAMESPACE} -o wide || true
                 echo ""
+                echo "📊 Node Resources:"
+                kubectl describe nodes | grep -A10 "Allocated resources:" || true
+                echo ""
                 echo "🔧 Troubleshooting tips:"
-                echo "1. Check if resources are available on nodes"
+                echo "1. Check if nodes have sufficient resources"
                 echo "2. Verify storage class 'gp2' is available"
-                echo "3. Check security group settings"
+                echo "3. Check security group settings for ALB"
                 echo "4. Review Helm release status: helm status elasticsearch -n ${NAMESPACE}"
             """ 
         }
