@@ -7,14 +7,14 @@ pipeline {
         AWS_REGION = "${params.AWS_REGION ?: 'us-east-1'}"
         NAMESPACE = "${params.NAMESPACE ?: 'elastic-stack'}"
         
-        // Elasticsearch Configuration
-        ES_VERSION = "${params.ES_VERSION ?: '8.11.0'}"
+        // Elasticsearch Configuration - Updated to available version
+        ES_VERSION = "${params.ES_VERSION ?: '8.5.1'}"
         ES_REPLICAS = "${params.ES_REPLICAS ?: '3'}"
         ES_STORAGE_SIZE = "${params.ES_STORAGE_SIZE ?: '100Gi'}"
         ES_MEMORY_LIMIT = "${params.ES_MEMORY_LIMIT ?: '4Gi'}"
         
-        // Kibana Configuration
-        KIBANA_VERSION = "${params.KIBANA_VERSION ?: '8.11.0'}"
+        // Kibana Configuration - Updated to available version
+        KIBANA_VERSION = "${params.KIBANA_VERSION ?: '8.5.1'}"
         KIBANA_REPLICAS = "${params.KIBANA_REPLICAS ?: '2'}"
         KIBANA_MEMORY_LIMIT = "${params.KIBANA_MEMORY_LIMIT ?: '4Gi'}"
         KIBANA_DOMAIN = "${params.KIBANA_DOMAIN ?: 'kibana.yourdomain.com'}"
@@ -71,6 +71,8 @@ pipeline {
                     echo "Mode: ${DEPLOYMENT_MODE}"
                     echo "Action: ${params.ACTION}"
                     echo "Dry Run: ${params.DRY_RUN}"
+                    echo "ES Version: ${ES_VERSION}"
+                    echo "Kibana Version: ${KIBANA_VERSION}"
                 }
             }
         }
@@ -92,6 +94,10 @@ pipeline {
                     sh "helm repo add elastic https://helm.elastic.co"
                     sh "helm repo update"
                     sh "helm version"
+                    
+                    echo "🔍 Checking available chart versions..."
+                    sh "helm search repo elastic/elasticsearch --versions | head -3"
+                    sh "helm search repo elastic/kibana --versions | head -3"
                 }
             }
         }
@@ -108,18 +114,18 @@ pipeline {
                     echo "🏗️ Creating namespace and secrets..."
                     sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
                     
-                    // Create Elasticsearch password secret
+                    // Create Elasticsearch password secret with secure handling
                     sh """
                         kubectl create secret generic elasticsearch-master-credentials \\
-                            --from-literal=password='${ES_PASSWORD}' \\
+                            --from-literal=password=\${ES_PASSWORD} \\
                             -n ${NAMESPACE} \\
                             --dry-run=client -o yaml | kubectl apply -f -
                     """
                     
-                    // Create Kibana encryption key secret
+                    // Create Kibana encryption key secret with secure handling
                     sh """
                         kubectl create secret generic kibana-encryption-key \\
-                            --from-literal=encryptionkey='${KIBANA_ENCRYPTION_KEY}' \\
+                            --from-literal=encryptionkey=\${KIBANA_ENCRYPTION_KEY} \\
                             -n ${NAMESPACE} \\
                             --dry-run=client -o yaml | kubectl apply -f -
                     """
@@ -254,7 +260,7 @@ extraEnvs:
                     // Test Elasticsearch health
                     sh """
                         kubectl exec -n ${NAMESPACE} elasticsearch-master-0 -- \\
-                            curl -u "elastic:${ES_PASSWORD}" \\
+                            curl -u "elastic:\${ES_PASSWORD}" \\
                             -H "Content-Type: application/json" \\
                             http://localhost:9200/_cluster/health?pretty
                     """
@@ -324,6 +330,8 @@ extraEnvs:
       secretKeyRef:
         name: kibana-encryption-key
         key: encryptionkey
+  - name: "NODE_OPTIONS"
+    value: "--max-old-space-size=3584"
 
 kibanaConfig:
   kibana.yml: |
@@ -337,6 +345,8 @@ kibanaConfig:
     elasticsearch.requestTimeout: 90000
     ops.interval: 30000
     logging.root.level: warn
+    data.search.aggs.shardDelay.enabled: true
+    xpack.monitoring.kibana.collection.enabled: true
 
 persistence:
   enabled: true
@@ -395,8 +405,42 @@ antiAffinity: "soft"
 Namespace: ${NAMESPACE}
 Kibana URL: http://${KIBANA_DOMAIN}
 Username: elastic
-Password: ${ES_PASSWORD}
+Password: Check Jenkins credentials 'elasticsearch-password'
                     """
+                }
+            }
+        }
+        
+        stage('Rollback') {
+            when {
+                expression { params.ACTION == 'rollback' }
+            }
+            steps {
+                script {
+                    echo "🔄 Rolling back deployments..."
+                    if (DEPLOYMENT_MODE != "elasticsearch-only") {
+                        sh "helm rollback kibana -n ${NAMESPACE}"
+                    }
+                    if (DEPLOYMENT_MODE != "kibana-only") {
+                        sh "helm rollback elasticsearch -n ${NAMESPACE}"
+                    }
+                }
+            }
+        }
+        
+        stage('Uninstall') {
+            when {
+                expression { params.ACTION == 'uninstall' }
+            }
+            steps {
+                script {
+                    echo "🗑️ Uninstalling ELK stack..."
+                    if (DEPLOYMENT_MODE != "elasticsearch-only") {
+                        sh "helm uninstall kibana -n ${NAMESPACE} || true"
+                    }
+                    if (DEPLOYMENT_MODE != "kibana-only") {
+                        sh "helm uninstall elasticsearch -n ${NAMESPACE} || true"
+                    }
                 }
             }
         }
