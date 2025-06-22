@@ -147,7 +147,7 @@ pipeline {
             steps {
                 script {
                     writeFile file: 'elasticsearch-values.yaml', text: """
-# Elasticsearch Values - Optimized for t3.medium EKS Nodes
+# Elasticsearch Values - Optimized for t3.medium EKS Nodes (FIXED VERSION)
 clusterName: "elasticsearch"
 nodeGroup: "master"
 
@@ -203,10 +203,11 @@ esConfig:
     xpack.security.http.ssl.enabled: false
     # Performance optimizations for smaller setup
     bootstrap.memory_lock: false
-    cluster.routing.allocation.disk.threshold.enabled: true
-    cluster.routing.allocation.disk.watermark.low: 85%
-    cluster.routing.allocation.disk.watermark.high: 90%
-    cluster.routing.allocation.disk.watermark.flood_stage: 95%
+    # 🔧 FIXED: Use underscore instead of dots in setting names
+    cluster.routing.allocation.disk.threshold_enabled: true
+    cluster.routing.allocation.disk.watermark.low: "85%"
+    cluster.routing.allocation.disk.watermark.high: "90%"
+    cluster.routing.allocation.disk.watermark.flood_stage: "95%"
 
 # Soft anti-affinity for single node setup
 antiAffinity: "soft"
