@@ -1,29 +1,5 @@
 pipeline {
-    agent {
-        kubernetes {
-            yaml """
-                apiVersion: v1
-                kind: Pod
-                spec:
-                  containers:
-                  - name: kubectl
-                    image: bitnami/kubectl:latest
-                    command:
-                    - cat
-                    tty: true
-                  - name: helm
-                    image: alpine/helm:3.13.0
-                    command:
-                    - cat
-                    tty: true
-                  - name: aws-cli
-                    image: amazon/aws-cli:latest
-                    command:
-                    - cat
-                    tty: true
-            """
-        }
-    }
+    agent any
     
     environment {
         // EKS Configuration
@@ -46,7 +22,6 @@ pipeline {
         // Deployment Configuration
         DEPLOYMENT_MODE = "${params.DEPLOYMENT_MODE ?: 'full-stack'}"
         ENABLE_SSL = "${params.ENABLE_SSL ?: 'false'}"
-        ACM_CERT_ARN = "${params.ACM_CERT_ARN ?: ''}"
         
         // Security
         ES_PASSWORD = credentials('elasticsearch-password')
@@ -71,7 +46,7 @@ pipeline {
         )
         string(
             name: 'KIBANA_DOMAIN',
-            defaultValue: 'kibana.yourdomain.com',
+            defaultValue: 'kibana-test.local',
             description: 'Kibana domain name'
         )
         booleanParam(
@@ -101,50 +76,22 @@ pipeline {
         }
         
         stage('Prerequisites Check') {
-            parallel {
-                stage('AWS Configuration') {
-                    steps {
-                        container('aws-cli') {
-                            script {
-                                sh """
-                                    echo "🔍 Checking AWS connectivity..."
-                                    aws sts get-caller-identity
-                                    aws eks describe-cluster --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
-                                """
-                            }
-                        }
-                    }
-                }
-                
-                stage('Kubernetes Connectivity') {
-                    steps {
-                        container('kubectl') {
-                            script {
-                                sh """
-                                    echo "🔍 Checking Kubernetes connectivity..."
-                                    aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
-                                    kubectl cluster-info
-                                    kubectl get nodes
-                                    kubectl get storageclass
-                                """
-                            }
-                        }
-                    }
-                }
-                
-                stage('Helm Setup') {
-                    steps {
-                        container('helm') {
-                            script {
-                                sh """
-                                    echo "🔍 Setting up Helm repositories..."
-                                    helm repo add elastic https://helm.elastic.co
-                                    helm repo update
-                                    helm version
-                                """
-                            }
-                        }
-                    }
+            steps {
+                script {
+                    echo "🔍 Checking AWS connectivity..."
+                    sh "aws sts get-caller-identity"
+                    sh "aws eks describe-cluster --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                    
+                    echo "🔍 Checking Kubernetes connectivity..."
+                    sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                    sh "kubectl cluster-info"
+                    sh "kubectl get nodes"
+                    sh "kubectl get storageclass"
+                    
+                    echo "🔍 Setting up Helm repositories..."
+                    sh "helm repo add elastic https://helm.elastic.co"
+                    sh "helm repo update"
+                    sh "helm version"
                 }
             }
         }
@@ -157,25 +104,25 @@ pipeline {
                 }
             }
             steps {
-                container('kubectl') {
-                    script {
-                        sh """
-                            echo "🏗️ Creating namespace and secrets..."
-                            kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
-                            
-                            # Create Elasticsearch password secret
-                            kubectl create secret generic elasticsearch-master-credentials \\
-                                --from-literal=password=\${ES_PASSWORD} \\
-                                -n ${NAMESPACE} \\
-                                --dry-run=client -o yaml | kubectl apply -f -
-                            
-                            # Create Kibana encryption key secret
-                            kubectl create secret generic kibana-encryption-key \\
-                                --from-literal=encryptionkey=\${KIBANA_ENCRYPTION_KEY} \\
-                                -n ${NAMESPACE} \\
-                                --dry-run=client -o yaml | kubectl apply -f -
-                        """
-                    }
+                script {
+                    echo "🏗️ Creating namespace and secrets..."
+                    sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
+                    
+                    // Create Elasticsearch password secret
+                    sh """
+                        kubectl create secret generic elasticsearch-master-credentials \\
+                            --from-literal=password='${ES_PASSWORD}' \\
+                            -n ${NAMESPACE} \\
+                            --dry-run=client -o yaml | kubectl apply -f -
+                    """
+                    
+                    // Create Kibana encryption key secret
+                    sh """
+                        kubectl create secret generic kibana-encryption-key \\
+                            --from-literal=encryptionkey='${KIBANA_ENCRYPTION_KEY}' \\
+                            -n ${NAMESPACE} \\
+                            --dry-run=client -o yaml | kubectl apply -f -
+                    """
                 }
             }
         }
@@ -194,9 +141,8 @@ pipeline {
                 }
             }
             steps {
-                container('helm') {
-                    script {
-                        writeFile file: 'elasticsearch-values.yaml', text: """
+                script {
+                    writeFile file: 'elasticsearch-values.yaml', text: """
 # Elasticsearch Values for EKS Production
 clusterName: "elasticsearch"
 nodeGroup: "master"
@@ -261,26 +207,25 @@ extraEnvs:
         name: elasticsearch-master-credentials
         key: password
 """
-                        
-                        if (params.DRY_RUN) {
-                            sh """
-                                echo "🧪 DRY RUN: Elasticsearch deployment"
-                                helm template elasticsearch elastic/elasticsearch \\
-                                    -f elasticsearch-values.yaml \\
-                                    -n ${NAMESPACE} \\
-                                    --version ${ES_VERSION}
-                            """
-                        } else {
-                            sh """
-                                echo "🚀 Deploying Elasticsearch..."
-                                helm upgrade --install elasticsearch elastic/elasticsearch \\
-                                    -f elasticsearch-values.yaml \\
-                                    -n ${NAMESPACE} \\
-                                    --version ${ES_VERSION} \\
-                                    --timeout 15m \\
-                                    --wait
-                            """
-                        }
+                    
+                    if (params.DRY_RUN) {
+                        echo "🧪 DRY RUN: Elasticsearch deployment"
+                        sh """
+                            helm template elasticsearch elastic/elasticsearch \\
+                                -f elasticsearch-values.yaml \\
+                                -n ${NAMESPACE} \\
+                                --version ${ES_VERSION}
+                        """
+                    } else {
+                        echo "🚀 Deploying Elasticsearch..."
+                        sh """
+                            helm upgrade --install elasticsearch elastic/elasticsearch \\
+                                -f elasticsearch-values.yaml \\
+                                -n ${NAMESPACE} \\
+                                --version ${ES_VERSION} \\
+                                --timeout 15m \\
+                                --wait
+                        """
                     }
                 }
             }
@@ -301,22 +246,18 @@ extraEnvs:
                 }
             }
             steps {
-                container('kubectl') {
-                    script {
-                        sh """
-                            echo "🔍 Verifying Elasticsearch deployment..."
-                            kubectl wait --for=condition=ready pod -l app=elasticsearch-master \\
-                                -n ${NAMESPACE} --timeout=600s
-                            
-                            kubectl get pods -n ${NAMESPACE} -l app=elasticsearch-master
-                            
-                            # Test Elasticsearch health
-                            kubectl exec -n ${NAMESPACE} elasticsearch-master-0 -- \\
-                                curl -u "elastic:\${ES_PASSWORD}" \\
-                                -H "Content-Type: application/json" \\
-                                http://localhost:9200/_cluster/health?pretty
-                        """
-                    }
+                script {
+                    echo "🔍 Verifying Elasticsearch deployment..."
+                    sh "kubectl wait --for=condition=ready pod -l app=elasticsearch-master -n ${NAMESPACE} --timeout=600s"
+                    sh "kubectl get pods -n ${NAMESPACE} -l app=elasticsearch-master"
+                    
+                    // Test Elasticsearch health
+                    sh """
+                        kubectl exec -n ${NAMESPACE} elasticsearch-master-0 -- \\
+                            curl -u "elastic:${ES_PASSWORD}" \\
+                            -H "Content-Type: application/json" \\
+                            http://localhost:9200/_cluster/health?pretty
+                    """
                 }
             }
         }
@@ -335,16 +276,8 @@ extraEnvs:
                 }
             }
             steps {
-                container('helm') {
-                    script {
-                        def sslConfig = ""
-                        if (params.ENABLE_SSL && ACM_CERT_ARN) {
-                            sslConfig = """
-    alb.ingress.kubernetes.io/certificate-arn: "${ACM_CERT_ARN}"
-    alb.ingress.kubernetes.io/ssl-redirect: '443'"""
-                        }
-                        
-                        writeFile file: 'kibana-values.yaml', text: """
+                script {
+                    writeFile file: 'kibana-values.yaml', text: """
 # Kibana Values for EKS Production
 elasticsearchHosts: "http://elasticsearch-master:9200"
 
@@ -371,7 +304,7 @@ ingress:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/healthcheck-path: /api/status${sslConfig}
+    alb.ingress.kubernetes.io/healthcheck-path: /api/status
   hosts:
     - host: "${KIBANA_DOMAIN}"
       paths:
@@ -391,14 +324,12 @@ extraEnvs:
       secretKeyRef:
         name: kibana-encryption-key
         key: encryptionkey
-  - name: "NODE_OPTIONS"
-    value: "--max-old-space-size=3584"
 
 kibanaConfig:
   kibana.yml: |
     server.name: "kibana"
     server.host: "0.0.0.0"
-    server.publicBaseUrl: "https://${KIBANA_DOMAIN}"
+    server.publicBaseUrl: "http://${KIBANA_DOMAIN}"
     elasticsearch.hosts: ["http://elasticsearch-master:9200"]
     elasticsearch.username: "\${ELASTICSEARCH_USERNAME}"
     elasticsearch.password: "\${ELASTICSEARCH_PASSWORD}"
@@ -406,8 +337,6 @@ kibanaConfig:
     elasticsearch.requestTimeout: 90000
     ops.interval: 30000
     logging.root.level: warn
-    data.search.aggs.shardDelay.enabled: true
-    xpack.monitoring.kibana.collection.enabled: true
 
 persistence:
   enabled: true
@@ -416,26 +345,25 @@ persistence:
 
 antiAffinity: "soft"
 """
-                        
-                        if (params.DRY_RUN) {
-                            sh """
-                                echo "🧪 DRY RUN: Kibana deployment"
-                                helm template kibana elastic/kibana \\
-                                    -f kibana-values.yaml \\
-                                    -n ${NAMESPACE} \\
-                                    --version ${KIBANA_VERSION}
-                            """
-                        } else {
-                            sh """
-                                echo "🚀 Deploying Kibana..."
-                                helm upgrade --install kibana elastic/kibana \\
-                                    -f kibana-values.yaml \\
-                                    -n ${NAMESPACE} \\
-                                    --version ${KIBANA_VERSION} \\
-                                    --timeout 10m \\
-                                    --wait
-                            """
-                        }
+                    
+                    if (params.DRY_RUN) {
+                        echo "🧪 DRY RUN: Kibana deployment"
+                        sh """
+                            helm template kibana elastic/kibana \\
+                                -f kibana-values.yaml \\
+                                -n ${NAMESPACE} \\
+                                --version ${KIBANA_VERSION}
+                        """
+                    } else {
+                        echo "🚀 Deploying Kibana..."
+                        sh """
+                            helm upgrade --install kibana elastic/kibana \\
+                                -f kibana-values.yaml \\
+                                -n ${NAMESPACE} \\
+                                --version ${KIBANA_VERSION} \\
+                                --timeout 10m \\
+                                --wait
+                        """
                     }
                 }
             }
@@ -456,66 +384,19 @@ antiAffinity: "soft"
                 }
             }
             steps {
-                container('kubectl') {
-                    script {
-                        sh """
-                            echo "🔍 Verifying Kibana deployment..."
-                            kubectl wait --for=condition=ready pod -l app=kibana \\
-                                -n ${NAMESPACE} --timeout=300s
-                            
-                            kubectl get pods -n ${NAMESPACE} -l app=kibana
-                            kubectl get ingress -n ${NAMESPACE}
-                            
-                            # Get access information
-                            echo "📋 Deployment Summary:"
-                            echo "Namespace: ${NAMESPACE}"
-                            echo "Kibana URL: https://${KIBANA_DOMAIN}"
-                            echo "Username: elastic"
-                            echo "Password: \${ES_PASSWORD}"
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Rollback') {
-            when {
-                expression { params.ACTION == 'rollback' }
-            }
-            steps {
-                container('helm') {
-                    script {
-                        sh """
-                            echo "🔄 Rolling back deployments..."
-                            if [ "${DEPLOYMENT_MODE}" != "elasticsearch-only" ]; then
-                                helm rollback kibana -n ${NAMESPACE}
-                            fi
-                            if [ "${DEPLOYMENT_MODE}" != "kibana-only" ]; then
-                                helm rollback elasticsearch -n ${NAMESPACE}
-                            fi
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Uninstall') {
-            when {
-                expression { params.ACTION == 'uninstall' }
-            }
-            steps {
-                container('helm') {
-                    script {
-                        sh """
-                            echo "🗑️ Uninstalling ELK stack..."
-                            if [ "${DEPLOYMENT_MODE}" != "elasticsearch-only" ]; then
-                                helm uninstall kibana -n ${NAMESPACE} || true
-                            fi
-                            if [ "${DEPLOYMENT_MODE}" != "kibana-only" ]; then
-                                helm uninstall elasticsearch -n ${NAMESPACE} || true
-                            fi
-                        """
-                    }
+                script {
+                    echo "🔍 Verifying Kibana deployment..."
+                    sh "kubectl wait --for=condition=ready pod -l app=kibana -n ${NAMESPACE} --timeout=300s"
+                    sh "kubectl get pods -n ${NAMESPACE} -l app=kibana"
+                    sh "kubectl get ingress -n ${NAMESPACE}"
+                    
+                    echo """
+📋 Deployment Summary:
+Namespace: ${NAMESPACE}
+Kibana URL: http://${KIBANA_DOMAIN}
+Username: elastic
+Password: ${ES_PASSWORD}
+                    """
                 }
             }
         }
@@ -525,12 +406,10 @@ antiAffinity: "soft"
         always {
             script {
                 if (!params.DRY_RUN && params.ACTION != 'uninstall') {
-                    container('kubectl') {
-                        sh """
-                            echo "📊 Final Status Check:"
-                            kubectl get all -n ${NAMESPACE} || true
-                        """
-                    }
+                    sh """
+                        echo "📊 Final Status Check:"
+                        kubectl get all -n ${NAMESPACE} || true
+                    """
                 }
             }
         }
@@ -542,7 +421,7 @@ antiAffinity: "soft"
 🎉 Deployment Successful!
 
 Access Information:
-- Kibana URL: https://${KIBANA_DOMAIN}
+- Kibana URL: http://${KIBANA_DOMAIN}
 - Username: elastic  
 - Password: Check Jenkins credentials 'elasticsearch-password'
 - Namespace: ${NAMESPACE}
@@ -558,13 +437,11 @@ Next Steps:
         }
         failure {
             echo "❌ ELK Stack deployment failed!"
-            container('kubectl') {
-                sh """
-                    echo "🔍 Debugging information:"
-                    kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' || true
-                    kubectl get pods -n ${NAMESPACE} -o wide || true
-                """
-            }
+            sh """
+                echo "🔍 Debugging information:"
+                kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' || true
+                kubectl get pods -n ${NAMESPACE} -o wide || true
+            """ 
         }
     }
 }
