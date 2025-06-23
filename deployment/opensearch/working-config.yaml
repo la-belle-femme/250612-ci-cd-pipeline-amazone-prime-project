@@ -1,0 +1,44 @@
+clusterName: "amazon-prime-opensearch"
+nodeGroup: "master"
+replicas: 1
+
+# Security configuration with required password
+securityConfig:
+  enabled: true
+  adminPassword: "AdminPassword123!"
+
+# Set the required environment variable
+extraEnvs:
+  - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    value: "AdminPassword123!"
+  - name: DISABLE_INSTALL_DEMO_CONFIG
+    value: "true"
+
+opensearchConfiguration:
+  opensearch.yml: |
+    cluster.name: amazon-prime-opensearch
+    network.host: 0.0.0.0
+    discovery.type: single-node
+    plugins.security.disabled: false
+    plugins.security.allow_default_init_securityindex: true
+
+# Conservative resources for t3.medium
+resources:
+  requests:
+    cpu: "200m"
+    memory: "1Gi"
+  limits:
+    cpu: "1000m"
+    memory: "2Gi"
+
+# Proper heap size
+opensearchJavaOpts: "-Xmx1g -Xms1g"
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: "gp2"
+
+# Service
+service:
+  type: ClusterIP

@@ -1,0 +1,63 @@
+# Production OpenSearch Configuration
+# Optimized for fresh EKS cluster and 10 users
+
+clusterName: "amazon-prime-opensearch"
+nodeGroup: "master"
+
+# Single node configuration (perfect for your setup)
+replicas: 1
+minimumMasterNodes: 1
+
+# Security disabled for easy access (no authentication issues)
+securityConfig:
+  enabled: false
+
+# OpenSearch configuration  
+opensearchConfiguration:
+  opensearch.yml: |
+    cluster.name: amazon-prime-opensearch
+    network.host: 0.0.0.0
+    plugins.security.disabled: true
+    discovery.type: single-node
+    http.port: 9200
+    transport.port: 9300
+    # Optimize for your t3.medium nodes
+    thread_pool.write.queue_size: 10000
+    indices.memory.index_buffer_size: 10%
+    # Enable metrics for monitoring
+    http.cors.enabled: true
+    http.cors.allow-origin: "*"
+    http.cors.allow-headers: "Authorization,X-Requested-With,Content-Type,Content-Length"
+
+# Resource allocation optimized for t3.medium
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "1500m"
+    memory: "3Gi"
+
+# Persistence for data
+persistence:
+  enabled: true
+  size: 30Gi
+  storageClass: "gp2"  # Standard AWS EBS
+
+# Service configuration
+service:
+  type: ClusterIP
+  httpPortName: http
+  transportPortName: transport
+
+# Java heap settings (1.5GB for 3GB container)
+opensearchJavaOpts: "-Xmx1536m -Xms1536m"
+
+# Anti-affinity disabled for single node
+antiAffinity: "soft"
+
+# Pod security and networking
+podSecurityPolicy:
+  create: false
+networkPolicy:
+  create: false

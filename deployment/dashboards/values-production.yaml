@@ -1,0 +1,58 @@
+# Production OpenSearch Dashboards Configuration
+# No authentication issues, clean connectivity
+
+opensearchHosts: "http://amazon-prime-opensearch-master:9200"
+
+replicaCount: 1
+
+# Security disabled to match OpenSearch
+securityConfig:
+  enabled: false
+
+# Dashboard configuration for smooth operation
+opensearchDashboardsYml:
+  opensearch_dashboards.yml: |
+    server.host: 0.0.0.0
+    server.port: 5601
+    opensearch.hosts: ["http://amazon-prime-opensearch-master:9200"]
+    opensearch.ssl.verificationMode: none
+    opensearch.requestHeadersWhitelist: [authorization, securitytenant]
+    server.basePath: ""
+    server.rewriteBasePath: false
+    # Optimize for 10 users
+    opensearch.requestTimeout: 30000
+    opensearch.shardTimeout: 30000
+    server.maxPayloadBytes: 1048576
+
+# Resources optimized for t3.medium nodes
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "750m"
+    memory: "1.5Gi"
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 5601
+  targetPort: 5601
+
+# Health checks
+healthcheck:
+  enabled: true
+  path: "/api/status"
+
+# No ingress initially (we'll use port-forward)
+ingress:
+  enabled: false
+
+# Pod disruption budget for availability
+podDisruptionBudget:
+  enabled: false
+  
+# Node placement
+nodeSelector: {}
+tolerations: []
+affinity: {}

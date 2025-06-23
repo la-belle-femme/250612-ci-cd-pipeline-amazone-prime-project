@@ -1,0 +1,109 @@
+pipeline {
+    agent any
+    
+    environment {
+        EKS_CLUSTER_NAME = 'amazon-prime-eks'
+        AWS_DEFAULT_REGION = 'us-east-1'
+        NAMESPACE = "elk-stack-${params.ENVIRONMENT}"
+    }
+    
+    stages {
+        stage('Ì¥ç Setup') {
+            steps {
+                script {
+                    sh '''
+                        echo "Setting up for ${ENVIRONMENT} environment"
+                        aws eks update-kubeconfig --region us-east-1 --name amazon-prime-eks
+                        kubectl create namespace ${NAMESPACE} || echo "Namespace exists"
+                        helm repo add opensearch https://opensearch-project.github.io/helm-charts/
+                        helm repo update
+                    '''
+                }
+            }
+        }
+        
+        stage('Ì∫Ä Deploy OpenSearch') {
+            when { 
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        helm upgrade --install amazon-prime-opensearch opensearch/opensearch \
+                            --set image.tag=2.11.1 \
+                            --set clusterName=amazon-prime-opensearch \
+                            --set replicas=1 \
+                            --set securityConfig.enabled=false \
+                            --set resources.requests.memory=1Gi \
+                            --set resources.limits.memory=2Gi \
+                            --set opensearchJavaOpts="-Xmx1g -Xms1g" \
+                            --set persistence.size=10Gi \
+                            -n ${NAMESPACE} \
+                            --wait --timeout=10m
+                    '''
+                }
+            }
+        }
+        
+        stage('Ì≥ä Deploy Dashboards') {
+            when { 
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        helm upgrade --install amazon-prime-dashboards opensearch/opensearch-dashboards \
+                            --set image.tag=2.11.1 \
+                            --set opensearchHosts="https://opensearch-cluster-master:9200" \
+                            --set securityConfig.enabled=true \
+                            -n ${NAMESPACE} \
+                            --wait --timeout=10m
+                    '''
+                }
+            }
+        }
+        
+        stage('Ì∑ëÔ∏è Destroy') {
+            when { expression { params.ACTION == 'destroy' } }
+            steps {
+                script {
+                    sh '''
+                        helm uninstall amazon-prime-dashboards -n ${NAMESPACE} || true
+                        helm uninstall amazon-prime-opensearch -n ${NAMESPACE} || true
+                        kubectl delete pvc --all -n ${NAMESPACE} || true
+                    '''
+                }
+            }
+        }
+        
+        stage('Ì≥ã Instructions') {
+            when { 
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'upgrade' }
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "=== ACCESS INSTRUCTIONS ==="
+                        echo "Environment: ${ENVIRONMENT}"
+                        echo "Namespace: ${NAMESPACE}"
+                        echo ""
+                        echo "Port-forward command:"
+                        echo "kubectl port-forward -n ${NAMESPACE} svc/amazon-prime-dashboards-opensearch-dashboards 5601:5601"
+                        echo ""
+                        echo "Access URL: http://localhost:5601"
+                        echo "Login: admin / admin"
+                    '''
+                }
+            }
+        }
+    }
+}

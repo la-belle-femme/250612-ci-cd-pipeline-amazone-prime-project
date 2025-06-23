@@ -1,0 +1,17 @@
+clusterName: "amazon-prime-logs"
+nodeGroup: "master" 
+replicas: 1
+
+opensearchJavaOpts: "-Xmx512m -Xms512m"
+
+config:
+  opensearch.yml: |
+    cluster.name: amazon-prime-logs
+    network.host: 0.0.0.0
+    discovery.type: single-node
+    plugins.security.disabled: true
+
+securityConfig:
+  enabled: false
+  
+singleNode: true

@@ -1,0 +1,25 @@
+replicas: 1
+
+kibanaConfig:
+  kibana.yml: |
+    server.host: 0.0.0.0
+    opensearch.hosts: ["http://amazon-prime-logs-master:9200"]
+    server.basePath: ""
+    server.rewriteBasePath: false
+    opensearch.ssl.verificationMode: none
+    opensearch.username: ""
+    opensearch.password: ""
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "512Mi"
+  limits:
+    cpu: "500m"
+    memory: "1Gi"
+
+service:
+  type: ClusterIP
+  port: 5601
+
+healthCheckPath: "/api/status"

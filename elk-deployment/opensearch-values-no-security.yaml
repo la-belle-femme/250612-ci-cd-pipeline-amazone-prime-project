@@ -1,0 +1,31 @@
+clusterName: "amazon-prime-logs"
+nodeGroup: "master"
+replicas: 1
+
+opensearchJavaOpts: "-Xmx512m -Xms512m"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "512Mi"
+  limits:
+    cpu: "500m"
+    memory: "1Gi"
+
+persistence:
+  enabled: true
+  storageClass: "gp2"
+  size: 5Gi
+
+config:
+  opensearch.yml: |
+    cluster.name: amazon-prime-logs
+    network.host: 0.0.0.0
+    discovery.type: single-node
+    plugins.security.disabled: true
+    plugins.security.ssl.transport.enabled: false
+    plugins.security.ssl.http.enabled: false
+
+singleNode: true
+securityConfig:
+  enabled: false

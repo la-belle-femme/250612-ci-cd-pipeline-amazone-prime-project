@@ -1,0 +1,37 @@
+image:
+  tag: "2.11.1"
+
+clusterName: "amazon-prime-opensearch"
+nodeGroup: "master"
+replicas: 1
+
+securityConfig:
+  enabled: false
+
+opensearchConfiguration:
+  opensearch.yml: |
+    cluster.name: amazon-prime-opensearch
+    network.host: 0.0.0.0
+    discovery.type: single-node
+    plugins.security.disabled: true
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "512Mi"
+  limits:
+    cpu: "500m"
+    memory: "1Gi"
+
+opensearchJavaOpts: "-Xmx512m -Xms512m"
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: "gp2"
+
+antiAffinity: "soft"
+podSecurityPolicy:
+  create: false
+networkPolicy:
+  create: false
